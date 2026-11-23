@@ -1,0 +1,20 @@
+{
+  "AppVersion": "2.2.1.5",
+  "Title": "星穹轨道",
+  "Thumbnail": "thumbnail.jpg",
+  "Preview": null,
+  "Desc": "环抱星尘的轨道艺术，指针可搅动粒子、点击点亮环带。",
+  "Author": "Contactable Wallpaper",
+  "License": "",
+  "Contact": "",
+  "Type": 1,
+  "FileName": "index.html",
+  "Arguments": null,
+  "IsAbsolutePath": false,
+  "Id": null,
+  "Tags": [
+    "宇宙",
+    "互动"
+  ],
+  "Version": 1
+}

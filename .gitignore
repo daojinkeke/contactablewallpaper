@@ -1,0 +1,92 @@
+# ---------- 构建产物 / Build outputs ----------
+[Bb]in/
+[Oo]bj/
+[Aa]rtifacts/
+publish/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+ARM64/
+*.binlog
+*.tlog
+*.obj
+*.pch
+*.pdb
+*.ilk
+*.cache
+*.nupkg
+*.snupkg
+*.msi
+*.msix
+*.msixbundle
+*.appx
+*.appxbundle
+
+# 安装包与随包二进制 / Installers & bundled binaries
+outputs/
+installer/prereq/*.exe
+installer/Output/
+*.exe
+*.dll
+
+# ---------- 本地配置与密钥 / Local config & secrets ----------
+AiSettings.json
+Settings.json
+Tokens.dat
+.dev.vars
+*.dev.vars
+secrets.json
+appsettings.*.json
+*.pfx
+*.p12
+*.snk
+*.key
+*.pem
+wrangler.toml.local
+
+# ---------- 日志 / Logs ----------
+logs/
+Logs/
+*.log
+*.txt.bak
+nlog-*.txt
+
+# ---------- 用户数据与生成产物 / User data & generated artifacts ----------
+*.depth.onnx
+*.onnx
+models/
+
+# ---------- IDE / 工具缓存 ----------
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.DotSettings.user
+TestResults/
+BenchmarkDotNet.Artifacts/
+
+# ---------- Node / 服务端 ----------
+node_modules/
+.wrangler/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------- 临时与诊断 / Temp & diagnostics ----------
+.trae/
+.screenshots/
+tmp/
+temp/
+*.tmp
+*.bak
+*.orig
+*.rej
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

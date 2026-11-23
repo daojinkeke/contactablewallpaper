@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#030811" />
+  <title>深海微光</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+    }
+
+    body {
+      overflow: hidden;
+      background:
+        radial-gradient(130% 100% at 50% 116%, #0a2740 0%, #04101d 48%, #02050b 100%);
+      cursor: default;
+      user-select: none;
+      animation: appear 1.8s ease .1s both;
+    }
+
+    @keyframes appear {
+      from {
+        opacity: 0;
+      }
+
+      to {
+        opacity: 1;
+      }
+    }
+
+    #sea {
+      position: fixed;
+      inset: 0;
+      display: block;
+    }
+
+    .vignette {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(118% 90% at 50% 42%, rgba(0, 0, 0, 0) 34%, rgba(0, 0, 0, .2) 68%, rgba(0, 0, 0, .62) 100%),
+        linear-gradient(180deg, rgba(0, 0, 0, .3), rgba(0, 0, 0, 0) 26%, rgba(0, 0, 0, 0) 72%, rgba(0, 0, 0, .5));
+    }
+
+    .grain {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .045;
+      mix-blend-mode: overlay;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+      background-size: 160px 160px;
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="sea"></canvas>
+  <div class="vignette"></div>
+  <div class="grain"></div>
+
+  <script>
+    (function () {
+      'use strict';
+
+      var TAU = Math.PI * 2;
+      var canvas = document.getElementById('sea');
+      var ctx = canvas.getContext('2d', { alpha: false });
+      var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+      var width = 0;
+      var height = 0;
+      var dpr = 1;
+      var background = null;
+      var sprite = null;
+
+      var pointerX = -1;
+      var pointerY = -1;
+      var smoothX = -1;
+      var smoothY = -1;
+
+      var particles = [];
+      var layers = [
+        { count: 1.6, speed: 0.35, alpha: 0.6, glow: 16 },
+        { count: 1.2, speed: 0.75, alpha: 0.92, glow: 30 },
+        { count: 0.3, speed: 0.22, alpha: 0.5, glow: 60 }
+      ];
+
+      function buildSprite() {
+        var size = 64;
+        sprite = document.createElement('canvas');
+        sprite.width = size;
+        sprite.height = size;
+        var sctx = sprite.getContext('2d');
+        var g = sctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+        g.addColorStop(0, 'rgba(222, 250, 255, 1)');
+        g.addColorStop(0.2, 'rgba(128, 228, 248, 0.82)');
+        g.addColorStop(0.52, 'rgba(48, 152, 228, 0.3)');
+        g.addColorStop(1, 'rgba(10, 40, 90, 0)');
+        sctx.fillStyle = g;
+        sctx.fillRect(0, 0, size, size);
+      }
+
+      function makeParticles() {
+        particles = [];
+        var area = width * height;
+        for (var l = 0; l < layers.length; l++) {
+          var layer = layers[l];
+          var count = Math.round(Math.max(40, Math.min(300, area / 14000)) * layer.count);
+          for (var i = 0; i < count; i++) {
+            particles.push({
+              x: Math.random() * width,
+              y: Math.random() * height,
+              z: 0.45 + Math.random() * 0.55,
+              vx: (Math.random() - 0.5) * 6 * layer.speed,
+              vy: -(4 + Math.random() * 12) * layer.speed,
+              alpha: layer.alpha * (0.5 + Math.random() * 0.5),
+              glow: layer.glow,
+              phase: Math.random() * TAU,
+              sway: 0.4 + Math.random() * 1.1
+            });
+          }
+        }
+      }
+
+      function resize() {
+        width = window.innerWidth;
+        height = window.innerHeight;
+        dpr = Math.min(2, window.devicePixelRatio || 1);
+
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.imageSmoothingEnabled = true;
+
+        background = ctx.createRadialGradient(
+          width * 0.5, height * 1.02, height * 0.04,
+          width * 0.5, height * 0.96, height * 1.2);
+        background.addColorStop(0, '#0c2f4a');
+        background.addColorStop(0.42, '#051425');
+        background.addColorStop(1, '#02050b');
+
+        makeParticles();
+      }
+
+      function drawParticle(p, t) {
+        var sway = Math.sin(t * p.sway + p.phase) * 9 * p.z;
+        var x = p.x + sway;
+        var y = p.y;
+        var size = p.glow * p.z;
+
+        ctx.globalAlpha = p.alpha;
+        ctx.drawImage(sprite, x - size / 2, y - size / 2, size, size);
+      }
+
+      function drawPointerGlow() {
+        if (smoothX < 0 || smoothY < 0) return;
+        var radius = Math.max(120, Math.min(width, height) * 0.2);
+        var glow = ctx.createRadialGradient(smoothX, smoothY, 0, smoothX, smoothY, radius);
+        glow.addColorStop(0, 'rgba(140, 236, 255, 0.10)');
+        glow.addColorStop(0.4, 'rgba(56, 150, 230, 0.05)');
+        glow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.fillStyle = glow;
+        ctx.fillRect(0, 0, width, height);
+        ctx.globalCompositeOperation = 'source-over';
+      }
+
+      var lastTime = 0;
+
+      function frame(now) {
+        var dt = lastTime ? Math.min(64, now - lastTime) / 16.67 : 1;
+        lastTime = now;
+        var t = reduceMotion ? 3.0 : now / 1000;
+
+        if (smoothX < 0 && pointerX >= 0) {
+          smoothX = pointerX;
+          smoothY = pointerY;
+        }
+        smoothX += (pointerX - smoothX) * 0.06;
+        smoothY += (pointerY - smoothY) * 0.06;
+
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.fillStyle = background;
+        ctx.fillRect(0, 0, width, height);
+        drawPointerGlow();
+
+        ctx.globalCompositeOperation = 'lighter';
+        for (var i = 0; i < particles.length; i++) {
+          var p = particles[i];
+          if (!reduceMotion) {
+            var dx = p.x - smoothX;
+            var dy = p.y - smoothY;
+            var dist2 = dx * dx + dy * dy;
+            if (smoothX >= 0 && dist2 < 26000 && dist2 > 1) {
+              var force = (26000 - dist2) / 26000;
+              var inv = 1 / Math.sqrt(dist2);
+              p.vx += dx * inv * force * 0.16 * p.z;
+              p.vy += dy * inv * force * 0.16 * p.z;
+            }
+
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.vx *= 0.985;
+            p.vy *= 0.985;
+            p.vy -= 0.006 * p.z;
+
+            if (p.y < -40) {
+              p.y = height + 30;
+              p.x = Math.random() * width;
+            }
+            if (p.x < -40) p.x = width + 30;
+            if (p.x > width + 40) p.x = -30;
+          }
+          drawParticle(p, t);
+        }
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.globalAlpha = 1;
+
+        requestAnimationFrame(frame);
+      }
+
+      window.addEventListener('resize', resize);
+      window.addEventListener('pointermove', function (e) {
+        pointerX = e.clientX;
+        pointerY = e.clientY;
+      });
+      window.addEventListener('pointerleave', function () {
+        pointerX = -1;
+        pointerY = -1;
+      });
+
+      buildSprite();
+      resize();
+      // 先同步绘制一帧，避免后台节流或截图时出现空白。
+      frame(performance.now());
+    })();
+  </script>
+</body>
+
+</html>

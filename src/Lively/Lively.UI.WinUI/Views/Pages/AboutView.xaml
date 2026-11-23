@@ -1,0 +1,74 @@
+<Page
+    x:Class="Lively.UI.WinUI.Views.Pages.AboutView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    MinWidth="500"
+    mc:Ignorable="d">
+
+    <Grid>
+        <ScrollViewer>
+            <StackPanel
+                MaxWidth="620"
+                Margin="24"
+                HorizontalAlignment="Left"
+                Spacing="14">
+                <StackPanel Orientation="Horizontal" Spacing="14">
+                    <Image
+                        Width="64"
+                        Height="64"
+                        Source="ms-appx:///Assets/contactable-blackhole.png"
+                        Stretch="Uniform" />
+                    <StackPanel VerticalAlignment="Center" Spacing="2">
+                        <TextBlock
+                            CharacterSpacing="140"
+                            FontSize="10"
+                            Foreground="{ThemeResource ContactableAccentBrush}"
+                            Text="CONTACTABLE WALLPAPER" />
+                        <TextBlock
+                            FontSize="24"
+                            FontWeight="SemiBold"
+                            Text="可交互 AI 壁纸工作台" />
+                    </StackPanel>
+                </StackPanel>
+
+                <TextBlock
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Text="四个模块：新建壁纸（远程 AI 生成可交互网页）、壁纸库、预览、设置。深度视差在本地离线运行，AI 网页生成使用你自己配置的 OpenAI 兼容模型。"
+                    TextWrapping="Wrap" />
+
+                <Border
+                    Padding="16"
+                    Background="{ThemeResource ContactableSurfaceBrush}"
+                    BorderBrush="{ThemeResource ContactableHairlineBrush}"
+                    BorderThickness="1"
+                    CornerRadius="12">
+                    <StackPanel Spacing="8">
+                        <TextBlock FontWeight="SemiBold" Text="本地与远程" />
+                        <TextBlock
+                            FontSize="12"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            Text="• 深度视差：本地 MiDaS 模型，首次下载约 62 MB，之后完全离线。"
+                            TextWrapping="Wrap" />
+                        <TextBlock
+                            FontSize="12"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            Text="• 网页壁纸：使用设置页配置的 BaseUrl / Model / ApiKey 生成，素材只保存在本机壁纸库。"
+                            TextWrapping="Wrap" />
+                        <TextBlock
+                            FontSize="12"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            Text="• 交互：网页壁纸通过 WebView2 渲染，鼠标事件由 Core 转发；需在设置页打开交互总开关。"
+                            TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
+                <TextBlock
+                    FontSize="12"
+                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                    Text="基于 Lively 开源内核（MIT）构建，界面与生成链路为 Contactable 定制。" />
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</Page>

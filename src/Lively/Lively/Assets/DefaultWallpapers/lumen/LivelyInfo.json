@@ -1,0 +1,20 @@
+{
+  "AppVersion": "2.2.1.5",
+  "Title": "深海微光",
+  "Thumbnail": "thumbnail.jpg",
+  "Preview": null,
+  "Desc": "深海中的发光浮游粒子，指针靠近会牵引光点聚拢。",
+  "Author": "Contactable Wallpaper",
+  "License": "",
+  "Contact": "",
+  "Type": 1,
+  "FileName": "index.html",
+  "Arguments": null,
+  "IsAbsolutePath": false,
+  "Id": null,
+  "Tags": [
+    "海洋",
+    "粒子"
+  ],
+  "Version": 1
+}

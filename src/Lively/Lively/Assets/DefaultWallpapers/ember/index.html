@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0a0503" />
+  <title>余烬之息</title>
+  <style>
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+      background: #080403;
+      overflow: hidden;
+    }
+
+    body {
+      cursor: crosshair;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    #scene {
+      position: fixed;
+      inset: 0;
+      display: block;
+    }
+
+    .vignette {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(120% 86% at 50% 58%, rgba(0, 0, 0, 0) 34%, rgba(0, 0, 0, .34) 72%, rgba(0, 0, 0, .72) 100%),
+        linear-gradient(180deg, rgba(0, 0, 0, .42), rgba(0, 0, 0, 0) 26%);
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="scene"></canvas>
+  <div class="vignette"></div>
+
+  <script>
+    (function () {
+      'use strict';
+
+      var TAU = Math.PI * 2;
+      var canvas = document.getElementById('scene');
+      var ctx = canvas.getContext('2d', { alpha: false });
+      var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+      var W = 0, H = 0, dpr = 1, bg = null, heat = null;
+      var pointer = { x: 0.5, y: 0.5, sx: 0.5, sy: 0.5, active: false };
+      var embers = [], sparks = [];
+      var lastInput = performance.now(), eco = 0, lastDraw = 0, time = 0, wind = 0;
+
+      function markInput() {
+        lastInput = performance.now();
+        eco = 0;
+      }
+
+      function rand(a, b) {
+        return a + Math.random() * (b - a);
+      }
+
+      function resize() {
+        W = window.innerWidth;
+        H = window.innerHeight;
+        dpr = Math.min(2, window.devicePixelRatio || 1);
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        bg = ctx.createLinearGradient(0, 0, 0, H);
+        bg.addColorStop(0, '#050202');
+        bg.addColorStop(0.55, '#0c0503');
+        bg.addColorStop(1, '#1a0904');
+
+        heat = ctx.createRadialGradient(W * 0.5, H * 1.04, 0, W * 0.5, H * 1.04, H * 0.82);
+        heat.addColorStop(0, 'rgba(255, 116, 38, 0.20)');
+        heat.addColorStop(0.45, 'rgba(180, 54, 16, 0.08)');
+        heat.addColorStop(1, 'rgba(0, 0, 0, 0)');
+
+        makeEmbers();
+      }
+
+      function makeEmbers() {
+        var count = Math.round(Math.min(320, Math.max(90, W * H / 8200)));
+        embers = [];
+        for (var i = 0; i < count; i++) {
+          embers.push({
+            x: Math.random(),
+            y: Math.random(),
+            vy: rand(0.012, 0.045),
+            drift: rand(0.004, 0.02),
+            size: rand(0.7, 2.4),
+            phase: rand(0, TAU),
+            speed: rand(0.5, 1.7),
+            hue: rand(16, 38),
+            alpha: rand(0.25, 0.9),
+            pull: rand(0.2, 1.0)
+          });
+        }
+      }
+
+      function spawnBurst(n, x, y) {
+        for (var i = 0; i < n; i++) {
+          var a = Math.random() * TAU;
+          var v = rand(0.04, 0.22);
+          sparks.push({
+            x: x,
+            y: y,
+            vx: Math.cos(a) * v,
+            vy: Math.sin(a) * v - rand(0.02, 0.09),
+            life: 1,
+            decay: rand(0.6, 1.6),
+            size: rand(0.8, 2.6),
+            hue: rand(18, 44)
+          });
+        }
+      }
+
+      function update(dt) {
+        pointer.sx += (pointer.x - pointer.sx) * Math.min(1, dt * 3.4);
+        pointer.sy += (pointer.y - pointer.sy) * Math.min(1, dt * 3.4);
+        wind = Math.sin(time * 0.22) * 0.6 + Math.sin(time * 0.07) * 0.4;
+
+        var px = pointer.sx, py = pointer.sy;
+        var pullX = (px - 0.5) * 0.02;
+        var pullY = (py - 0.5) * 0.012;
+        var boost = pointer.active ? 1 : 0;
+
+        for (var i = 0; i < embers.length; i++) {
+          var e = embers[i];
+          var dx = px - e.x;
+          var dy = py - e.y;
+          var d2 = dx * dx + dy * dy;
+          var influence = Math.max(0, 1 - Math.sqrt(d2) * 2.4) * e.pull;
+          e.y -= e.vy * dt * (0.7 + e.alpha);
+          e.x += (e.drift * Math.sin(time * e.speed + e.phase) + pullX) * dt;
+          e.x += Math.cos(time * 0.6 + e.phase) * 0.0025 * dt;
+          if (boost) {
+            e.x += dx * influence * 0.9 * dt;
+            e.y += dy * influence * 0.9 * dt;
+          }
+          if (e.y < -0.04) {
+            e.y = 1.04;
+            e.x = Math.random();
+          }
+          if (e.x < -0.05) e.x = 1.05;
+          if (e.x > 1.05) e.x = -0.05;
+        }
+
+        for (var j = sparks.length - 1; j >= 0; j--) {
+          var s = sparks[j];
+          s.life -= dt * s.decay;
+          if (s.life <= 0) {
+            sparks.splice(j, 1);
+            continue;
+          }
+          s.x += s.vx * dt;
+          s.y += s.vy * dt;
+          s.vy -= 0.035 * dt;
+          s.vx += wind * 0.004 * dt;
+        }
+      }
+
+      function glowDot(x, y, r, hue, alpha) {
+        var g = ctx.createRadialGradient(x, y, 0, x, y, r);
+        g.addColorStop(0, 'rgba(255, 214, 166, ' + (alpha * 0.9) + ')');
+        g.addColorStop(0.35, 'hsla(' + hue + ', 92%, 60%, ' + (alpha * 0.45) + ')');
+        g.addColorStop(1, 'hsla(' + hue + ', 90%, 50%, 0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, TAU);
+        ctx.fill();
+      }
+
+      function draw() {
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, W, H);
+
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.fillStyle = heat;
+        ctx.fillRect(0, 0, W, H);
+
+        for (var i = 0; i < embers.length; i++) {
+          var e = embers[i];
+          var flicker = 0.62 + 0.38 * Math.sin(time * e.speed * 1.8 + e.phase);
+          var x = e.x * W;
+          var y = e.y * H;
+          var a = e.alpha * flicker * (reduceMotion ? 0.8 : 1);
+          glowDot(x, y, Math.max(2, e.size * 5.5), e.hue, a);
+          ctx.fillStyle = 'hsla(' + e.hue + ', 96%, 74%, ' + a + ')';
+          ctx.beginPath();
+          ctx.arc(x, y, Math.max(0.6, e.size), 0, TAU);
+          ctx.fill();
+        }
+
+        for (var j = 0; j < sparks.length; j++) {
+          var s = sparks[j];
+          glowDot(s.x * W, s.y * H, Math.max(2, s.size * 6), s.hue, s.life * 0.85);
+        }
+
+        if (pointer.active) {
+          var gx = pointer.sx * W;
+          var gy = pointer.sy * H;
+          var halo = ctx.createRadialGradient(gx, gy, 0, gx, gy, Math.max(W, H) * 0.16);
+          halo.addColorStop(0, 'rgba(255, 168, 96, 0.10)');
+          halo.addColorStop(1, 'rgba(255, 120, 40, 0)');
+          ctx.fillStyle = halo;
+          ctx.fillRect(0, 0, W, H);
+        }
+
+        ctx.globalCompositeOperation = 'source-over';
+      }
+
+      function frame(now) {
+        var idle = now - lastInput;
+        var target = idle > 4000 ? 1 : 0;
+        eco += (target - eco) * 0.05;
+        var targetFps = 60 - eco * 40;
+        var step = 1000 / targetFps;
+        if (now - lastDraw < step - 1) {
+          requestAnimationFrame(frame);
+          return;
+        }
+        var dt = Math.min(0.1, (now - lastDraw) / 1000);
+        lastDraw = now;
+        time += reduceMotion ? 0 : dt;
+        update(dt);
+        draw();
+        requestAnimationFrame(frame);
+      }
+
+      window.addEventListener('resize', resize);
+      window.addEventListener('pointermove', function (e) {
+        pointer.x = e.clientX / Math.max(1, W);
+        pointer.y = e.clientY / Math.max(1, H);
+        pointer.active = true;
+        markInput();
+      });
+      window.addEventListener('pointerleave', function () {
+        pointer.active = false;
+        pointer.x = 0.5;
+        pointer.y = 0.5;
+      });
+      window.addEventListener('pointerdown', function (e) {
+        spawnBurst(26, e.clientX / Math.max(1, W), e.clientY / Math.max(1, H));
+        markInput();
+      });
+      window.addEventListener('keydown', function (e) {
+        if (e.key === ' ' || e.key === 'Enter') {
+          spawnBurst(40, 0.5, 0.62);
+        } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+          var dir = e.key === 'ArrowLeft' ? -1 : 1;
+          for (var i = 0; i < embers.length; i++)
+            embers[i].vy = Math.max(0.008, embers[i].vy + dir * 0.004);
+        }
+        markInput();
+      });
+
+      resize();
+      frame(performance.now());
+    })();
+  </script>
+</body>
+
+</html>

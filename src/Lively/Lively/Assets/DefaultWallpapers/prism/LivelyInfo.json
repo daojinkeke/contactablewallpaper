@@ -1,0 +1,20 @@
+{
+  "AppVersion": "2.2.1.5",
+  "Title": "棱镜回响",
+  "Thumbnail": "thumbnail.jpg",
+  "Preview": null,
+  "Desc": "旋转的棱镜光束，指针改变折射角度，点击荡开一圈光谱。",
+  "Author": "Contactable Wallpaper",
+  "License": "",
+  "Contact": "",
+  "Type": 1,
+  "FileName": "index.html",
+  "Arguments": null,
+  "IsAbsolutePath": false,
+  "Id": null,
+  "Tags": [
+    "光影",
+    "几何"
+  ],
+  "Version": 1
+}

@@ -1,0 +1,20 @@
+{
+  "AppVersion": "2.2.1.5",
+  "Title": "花间萤火",
+  "Thumbnail": "thumbnail.jpg",
+  "Preview": null,
+  "Desc": "幽暗花园里的萤火虫，指针吸引光点，点击让它们四散飞舞。",
+  "Author": "Contactable Wallpaper",
+  "License": "",
+  "Contact": "",
+  "Type": 1,
+  "FileName": "index.html",
+  "Arguments": null,
+  "IsAbsolutePath": false,
+  "Id": null,
+  "Tags": [
+    "自然",
+    "萤火"
+  ],
+  "Version": 1
+}

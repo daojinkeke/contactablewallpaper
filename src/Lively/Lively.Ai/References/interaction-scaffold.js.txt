@@ -1,0 +1,75 @@
+// Interaction scaffold — STRUCTURE ONLY.
+// Reuse this structure inside your own render loop. Do NOT copy any visual style
+// from this snippet: no colors, no fixed sizes, no theme values, no artwork.
+// All geometry here is expressed relative to the viewport or your own scene scale.
+
+var pointer = { x: 0, y: 0, active: false, down: false };
+var ripples = [];
+var RIPPLE_LIFE = 1.2; // seconds of structural timing only
+
+function onPointerMove(e) {
+  pointer.x = e.clientX;
+  pointer.y = e.clientY;
+  pointer.active = true;
+}
+
+window.addEventListener("pointermove", onPointerMove, { passive: true });
+
+window.addEventListener("pointerdown", function (e) {
+  onPointerMove(e);
+  pointer.down = true;
+  ripples.push({ x: e.clientX, y: e.clientY, born: performance.now() / 1000 });
+  if (ripples.length > 8) ripples.shift();
+}, { passive: true });
+
+window.addEventListener("pointerup", function () { pointer.down = false; }, { passive: true });
+window.addEventListener("pointercancel", function () { pointer.down = false; }, { passive: true });
+window.addEventListener("pointerleave", function () {
+  pointer.active = false;
+  pointer.down = false;
+}, { passive: true });
+window.addEventListener("blur", function () {
+  pointer.active = false;
+  pointer.down = false;
+});
+
+// Consume the interaction INSIDE your existing requestAnimationFrame loop.
+// Call once per frame before drawing. `t` must be seconds on the same clock
+// as performance.now() / 1000. `sceneScale` is your own scene radius, not a
+// fixed pixel value.
+function interactionOffsetFor(x, y, t, sceneScale) {
+  var ox = 0, oy = 0, boost = 0;
+
+  // Hover: distance falloff perturbs nearby elements, then eases back.
+  if (pointer.active) {
+    var dx = x - pointer.x;
+    var dy = y - pointer.y;
+    var dist = Math.sqrt(dx * dx + dy * dy) + 1e-4;
+    var radius = sceneScale * 1.5;
+    if (dist < radius) {
+      var f = 1 - dist / radius;
+      var strength = f * f * (pointer.down ? 1.6 : 1.0);
+      ox -= (dx / dist) * strength * sceneScale * 0.05;
+      oy -= (dy / dist) * strength * sceneScale * 0.05;
+      boost += f;
+    }
+  }
+
+  // Press: an expanding ring pushes elements outward as it passes them.
+  for (var i = 0; i < ripples.length; i++) {
+    var r = ripples[i];
+    var age = t - r.born;
+    if (age < 0 || age > RIPPLE_LIFE) continue;
+    var prog = age / RIPPLE_LIFE;
+    var ring = sceneScale * 4 * (1 - Math.pow(1 - prog, 2));
+    var dxr = x - r.x;
+    var dyr = y - r.y;
+    var dr = Math.sqrt(dxr * dxr + dyr * dyr) + 1e-4;
+    var w = Math.exp(-Math.pow((dr - ring) / (sceneScale * 0.6), 2)) * (1 - prog);
+    ox += (dxr / dr) * w * sceneScale * 0.06;
+    oy += (dyr / dr) * w * sceneScale * 0.06;
+    boost += w;
+  }
+
+  return { x: ox, y: oy, boost: boost };
+}

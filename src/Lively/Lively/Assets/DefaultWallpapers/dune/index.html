@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#140d18" />
+  <title>沙丘流痕</title>
+  <style>
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+      background: #0b070e;
+      overflow: hidden;
+    }
+
+    body {
+      cursor: crosshair;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    #scene {
+      position: fixed;
+      inset: 0;
+      display: block;
+    }
+
+    .vignette {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(110% 92% at 50% 46%, rgba(0, 0, 0, 0) 42%, rgba(0, 0, 0, .3) 76%, rgba(0, 0, 0, .66) 100%);
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="scene"></canvas>
+  <div class="vignette"></div>
+
+  <script>
+    (function () {
+      'use strict';
+
+      var TAU = Math.PI * 2;
+      var canvas = document.getElementById('scene');
+      var ctx = canvas.getContext('2d', { alpha: false });
+      var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+      var W = 0, H = 0, dpr = 1, sky = null, sun = null;
+      var pointer = { x: 0.5, y: 0.5, sx: 0.5, sy: 0.5, active: false };
+      var streaks = [], bursts = [];
+      var lastInput = performance.now(), eco = 0, lastDraw = 0, time = 0;
+      var windDir = 1, gust = 0;
+
+      var layers = [
+        { base: 0.60, amp: 0.032, freq: 1.5, speed: 0.05, color: '#3a2440', alpha: 0.95 },
+        { base: 0.70, amp: 0.040, freq: 1.1, speed: 0.08, color: '#2a1930', alpha: 0.96 },
+        { base: 0.82, amp: 0.048, freq: 0.85, speed: 0.12, color: '#1b1020', alpha: 0.97 },
+        { base: 0.94, amp: 0.036, freq: 1.7, speed: 0.16, color: '#100a14', alpha: 1 },
+      ];
+
+      function markInput() {
+        lastInput = performance.now();
+        eco = 0;
+      }
+
+      function rand(a, b) {
+        return a + Math.random() * (b - a);
+      }
+
+      function resize() {
+        W = window.innerWidth;
+        H = window.innerHeight;
+        dpr = Math.min(2, window.devicePixelRatio || 1);
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        sky = ctx.createLinearGradient(0, 0, 0, H * 0.8);
+        sky.addColorStop(0, '#171226');
+        sky.addColorStop(0.42, '#3d2a45');
+        sky.addColorStop(0.68, '#8d4f50');
+        sky.addColorStop(0.82, '#c97a52');
+        sky.addColorStop(1, '#1a1018');
+
+        sun = ctx.createRadialGradient(W * 0.68, H * 0.6, 0, W * 0.68, H * 0.6, H * 0.34);
+        sun.addColorStop(0, 'rgba(255, 214, 150, 0.85)');
+        sun.addColorStop(0.3, 'rgba(244, 152, 92, 0.28)');
+        sun.addColorStop(1, 'rgba(200, 90, 60, 0)');
+
+        makeStreaks();
+      }
+
+      function makeStreaks() {
+        var count = Math.round(Math.min(160, Math.max(50, W / 14)));
+        streaks = [];
+        for (var i = 0; i < count; i++) {
+          streaks.push({
+            x: Math.random(),
+            y: rand(0.5, 1.0),
+            len: rand(0.02, 0.12),
+            speed: rand(0.02, 0.09),
+            alpha: rand(0.06, 0.3),
+            phase: rand(0, TAU)
+          });
+        }
+      }
+
+      function addBurst(nx, ny) {
+        for (var i = 0; i < 22; i++) {
+          var a = rand(-Math.PI * 0.85, -Math.PI * 0.15);
+          var v = rand(0.03, 0.16);
+          bursts.push({
+            x: nx,
+            y: ny,
+            vx: Math.cos(a) * v,
+            vy: Math.sin(a) * v * 0.55,
+            life: 1,
+            decay: rand(0.7, 1.5),
+            size: rand(1, 3.4)
+          });
+        }
+      }
+
+      function duneY(layer, x) {
+        var t = time * layer.speed;
+        return H * layer.base +
+          Math.sin(x * 0.0016 * layer.freq * 6 + t + layer.base * 20) * H * layer.amp +
+          Math.sin(x * 0.0007 * layer.freq * 6 - t * 0.7) * H * layer.amp * 0.6;
+      }
+
+      function update(dt) {
+        pointer.sx += (pointer.x - pointer.sx) * Math.min(1, dt * 3);
+        pointer.sy += (pointer.y - pointer.sy) * Math.min(1, dt * 3);
+        gust = Math.max(0, gust - dt * 0.6);
+
+        var speedScale = 1 + gust * 1.8;
+        for (var i = 0; i < streaks.length; i++) {
+          var s = streaks[i];
+          s.x += s.speed * dt * windDir * speedScale * (0.7 + (pointer.sx - 0.5) * 0.8);
+          s.y += Math.sin(time * 1.4 + s.phase) * 0.004 * dt;
+          if (s.x > 1.08) s.x = -0.08;
+          if (s.x < -0.08) s.x = 1.08;
+        }
+
+        for (var j = bursts.length - 1; j >= 0; j--) {
+          var b = bursts[j];
+          b.life -= dt * b.decay;
+          if (b.life <= 0) {
+            bursts.splice(j, 1);
+            continue;
+          }
+          b.x += b.vx * dt * windDir;
+          b.y += b.vy * dt;
+          b.vy += 0.05 * dt;
+        }
+      }
+
+      function draw() {
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.fillStyle = sky;
+        ctx.fillRect(0, 0, W, H);
+
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.fillStyle = sun;
+        ctx.fillRect(0, 0, W, H);
+        ctx.globalCompositeOperation = 'source-over';
+
+        for (var l = 0; l < layers.length; l++) {
+          var layer = layers[l];
+          var shift = (pointer.sx - 0.5) * (l + 1) * 18;
+          ctx.fillStyle = layer.color;
+          ctx.globalAlpha = layer.alpha;
+          ctx.beginPath();
+          ctx.moveTo(-30, H + 30);
+          for (var x = -30; x <= W + 30; x += 12) {
+            ctx.lineTo(x + shift, duneY(layer, x + shift));
+          }
+          ctx.lineTo(W + 30, H + 30);
+          ctx.closePath();
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+
+        for (var i = 0; i < streaks.length; i++) {
+          var s = streaks[i];
+          var sx = s.x * W;
+          var sy = s.y * H;
+          var len = s.len * W * 0.4;
+          var grad = ctx.createLinearGradient(sx, sy, sx + len * windDir, sy);
+          grad.addColorStop(0, 'rgba(255, 208, 160, 0)');
+          grad.addColorStop(0.55, 'rgba(255, 208, 160, ' + s.alpha + ')');
+          grad.addColorStop(1, 'rgba(255, 208, 160, 0)');
+          ctx.strokeStyle = grad;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(sx, sy);
+          ctx.lineTo(sx + len * windDir, sy + Math.sin(time + s.phase) * 2);
+          ctx.stroke();
+        }
+
+        for (var j = 0; j < bursts.length; j++) {
+          var b = bursts[j];
+          ctx.fillStyle = 'rgba(255, 206, 150, ' + (b.life * 0.75) + ')';
+          ctx.beginPath();
+          ctx.arc(b.x * W, b.y * H, b.size, 0, TAU);
+          ctx.fill();
+        }
+      }
+
+      function frame(now) {
+        var idle = now - lastInput;
+        var target = idle > 4000 ? 1 : 0;
+        eco += (target - eco) * 0.05;
+        var targetFps = 60 - eco * 40;
+        var step = 1000 / targetFps;
+        if (now - lastDraw < step - 1) {
+          requestAnimationFrame(frame);
+          return;
+        }
+        var dt = Math.min(0.1, (now - lastDraw) / 1000);
+        lastDraw = now;
+        time += reduceMotion ? 0 : dt;
+        update(dt);
+        draw();
+        requestAnimationFrame(frame);
+      }
+
+      window.addEventListener('resize', resize);
+      window.addEventListener('pointermove', function (e) {
+        pointer.x = e.clientX / Math.max(1, W);
+        pointer.y = e.clientY / Math.max(1, H);
+        pointer.active = true;
+        markInput();
+      });
+      window.addEventListener('pointerleave', function () {
+        pointer.active = false;
+        pointer.x = 0.5;
+        pointer.y = 0.5;
+      });
+      window.addEventListener('pointerdown', function (e) {
+        addBurst(e.clientX / Math.max(1, W), e.clientY / Math.max(1, H));
+        gust = 1;
+        markInput();
+      });
+      window.addEventListener('keydown', function (e) {
+        if (e.key === ' ') gust = 1;
+        else if (e.key === 'ArrowLeft') windDir = -1;
+        else if (e.key === 'ArrowRight') windDir = 1;
+        else if (e.key === 'ArrowUp') {
+          for (var i = 0; i < streaks.length; i++) streaks[i].speed = Math.min(0.2, streaks[i].speed + 0.01);
+        }
+        markInput();
+      });
+
+      resize();
+      frame(performance.now());
+    })();
+  </script>
+</body>
+
+</html>

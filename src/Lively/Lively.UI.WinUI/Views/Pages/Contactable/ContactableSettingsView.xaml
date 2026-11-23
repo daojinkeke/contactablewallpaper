@@ -1,0 +1,354 @@
+<Page
+    x:Class="Lively.UI.WinUI.Views.Pages.Contactable.ContactableSettingsView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid>
+        <!--  远景：星尘与吸积光晕，纯装饰  -->
+        <Grid IsHitTestVisible="False">
+            <Grid.Background>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                    <GradientStop Offset="0" Color="#140B1E3F" />
+                    <GradientStop Offset="0.5" Color="#00000000" />
+                    <GradientStop Offset="1" Color="#14F59E0B" />
+                </LinearGradientBrush>
+            </Grid.Background>
+            <Ellipse
+                Width="600"
+                Height="360"
+                Margin="0,-200,-190,0"
+                HorizontalAlignment="Right"
+                VerticalAlignment="Top">
+                <Ellipse.Fill>
+                    <RadialGradientBrush>
+                        <GradientStop Offset="0" Color="#3A6EA8FE" />
+                        <GradientStop Offset="1" Color="#006EA8FE" />
+                    </RadialGradientBrush>
+                </Ellipse.Fill>
+            </Ellipse>
+            <Ellipse
+                Width="480"
+                Height="320"
+                Margin="-170,0,0,-160"
+                HorizontalAlignment="Left"
+                VerticalAlignment="Bottom">
+                <Ellipse.Fill>
+                    <RadialGradientBrush>
+                        <GradientStop Offset="0" Color="#2EF59E0B" />
+                        <GradientStop Offset="1" Color="#00F59E0B" />
+                    </RadialGradientBrush>
+                </Ellipse.Fill>
+            </Ellipse>
+            <Path
+                Fill="#59D6E4FF"
+                Stretch="Fill"
+                Data="M96,72 A2,2 0 1 1 100,72 A2,2 0 1 1 96,72 Z M226,140 A2,2 0 1 1 230,140 A2,2 0 1 1 226,140 Z M356,64 A2,2 0 1 1 360,64 A2,2 0 1 1 356,64 Z M486,176 A2,2 0 1 1 490,176 A2,2 0 1 1 486,176 Z M616,94 A2,2 0 1 1 620,94 A2,2 0 1 1 616,94 Z M746,154 A2,2 0 1 1 750,154 A2,2 0 1 1 746,154 Z M876,74 A2,2 0 1 1 880,74 A2,2 0 1 1 876,74 Z M946,212 A2,2 0 1 1 950,212 A2,2 0 1 1 946,212 Z M136,300 A2,2 0 1 1 140,300 A2,2 0 1 1 136,300 Z M276,380 A2,2 0 1 1 280,380 A2,2 0 1 1 276,380 Z M416,300 A2,2 0 1 1 420,300 A2,2 0 1 1 416,300 Z M546,420 A2,2 0 1 1 550,420 A2,2 0 1 1 546,420 Z M686,340 A2,2 0 1 1 690,340 A2,2 0 1 1 686,340 Z M826,440 A2,2 0 1 1 830,440 A2,2 0 1 1 826,440 Z M916,360 A2,2 0 1 1 920,360 A2,2 0 1 1 916,360 Z M76,520 A2,2 0 1 1 80,520 A2,2 0 1 1 76,520 Z M206,610 A2,2 0 1 1 210,610 A2,2 0 1 1 206,610 Z M356,540 A2,2 0 1 1 360,540 A2,2 0 1 1 356,540 Z M506,640 A2,2 0 1 1 510,640 A2,2 0 1 1 506,640 Z M646,560 A2,2 0 1 1 650,560 A2,2 0 1 1 646,560 Z M786,650 A2,2 0 1 1 790,650 A2,2 0 1 1 786,650 Z M906,560 A2,2 0 1 1 910,560 A2,2 0 1 1 906,560 Z" />
+        </Grid>
+
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel
+                MaxWidth="980"
+                Margin="28,18,28,40"
+                HorizontalAlignment="Left"
+                Spacing="16">
+
+                <Grid ColumnSpacing="16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Spacing="6">
+                        <StackPanel Orientation="Horizontal" Spacing="10">
+                            <PathIcon
+                                Width="22"
+                                Height="22"
+                                Foreground="{ThemeResource ContactableAccentBrush}"
+                                Data="F1 M2 12 A10 10 0 1 1 22 12 A10 10 0 1 1 2 12 Z M5.4 12 A6.6 6.6 0 1 0 18.6 12 A6.6 6.6 0 1 0 5.4 12 Z" />
+                            <TextBlock
+                                VerticalAlignment="Center"
+                                CharacterSpacing="120"
+                                FontSize="11"
+                                Foreground="{ThemeResource ContactableAccentBrush}"
+                                Text="SHELL 04 · SETTINGS" />
+                        </StackPanel>
+                        <TextBlock FontSize="30" FontWeight="SemiBold" Text="设置" />
+                        <TextBlock
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            Text="桌面交互、开机启动与 AI 生成配置。"
+                            TextWrapping="Wrap" />
+                    </StackPanel>
+                    <Border
+                        Grid.Column="1"
+                        Padding="14,10"
+                        VerticalAlignment="Center"
+                        Background="#146EA8FE"
+                        BorderBrush="{ThemeResource ContactableHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="12">
+                        <StackPanel Spacing="3">
+                            <TextBlock
+                                CharacterSpacing="140"
+                                FontSize="10"
+                                Foreground="{ThemeResource ContactableAccentBrush}"
+                                Text="LOCAL FIRST" />
+                            <TextBlock
+                                FontSize="12"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="配置留在本机" />
+                        </StackPanel>
+                    </Border>
+                </Grid>
+
+                <Border
+                    Padding="18"
+                    BorderBrush="{ThemeResource ContactableHairlineBrush}"
+                    BorderThickness="1"
+                    CornerRadius="16">
+                    <Border.Background>
+                        <LinearGradientBrush StartPoint="0,0" EndPoint="0.4,1">
+                            <GradientStop Offset="0" Color="#1FA0C4FF" />
+                            <GradientStop Offset="1" Color="#0890B4FF" />
+                        </LinearGradientBrush>
+                    </Border.Background>
+                    <StackPanel Spacing="12">
+                        <Grid ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border
+                                Width="4"
+                                Height="20"
+                                VerticalAlignment="Center"
+                                Background="{ThemeResource ContactableAccentBrush}"
+                                CornerRadius="2" />
+                            <StackPanel Grid.Column="1" Spacing="1">
+                                <TextBlock FontSize="16" FontWeight="SemiBold" Text="桌面交互" />
+                                <TextBlock
+                                    CharacterSpacing="100"
+                                    FontSize="10"
+                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                    Text="01 · INTERACTION" />
+                            </StackPanel>
+                        </Grid>
+                        <Grid ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="2">
+                                <TextBlock Text="交互总开关" />
+                                <TextBlock
+                                    FontSize="12"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="允许壁纸接收鼠标事件。默认开启。" />
+                            </StackPanel>
+                            <ToggleSwitch
+                                x:Name="InteractionToggle"
+                                Grid.Column="1"
+                                MinWidth="0"
+                                IsOn="True"
+                                Toggled="InteractionToggle_Toggled" />
+                        </Grid>
+                        <Rectangle
+                            Height="1"
+                            Fill="{ThemeResource ContactableHairlineBrush}"
+                            Opacity="0.6" />
+                        <Grid ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="2">
+                                <TextBlock x:Name="WheelLabel" Text="转发滚轮" />
+                                <TextBlock
+                                    FontSize="12"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="把滚轮事件转发给壁纸。" />
+                            </StackPanel>
+                            <ToggleSwitch
+                                x:Name="WheelToggle"
+                                Grid.Column="1"
+                                MinWidth="0" />
+                        </Grid>
+                        <Rectangle
+                            Height="1"
+                            Fill="{ThemeResource ContactableHairlineBrush}"
+                            Opacity="0.6" />
+                        <Grid ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="2">
+                                <TextBlock x:Name="MiddleLabel" Text="转发中键" />
+                                <TextBlock
+                                    FontSize="12"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="把中键事件转发给壁纸。" />
+                            </StackPanel>
+                            <ToggleSwitch
+                                x:Name="MiddleToggle"
+                                Grid.Column="1"
+                                MinWidth="0" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <Border
+                    Padding="18"
+                    BorderBrush="{ThemeResource ContactableHairlineBrush}"
+                    BorderThickness="1"
+                    CornerRadius="16">
+                    <Border.Background>
+                        <LinearGradientBrush StartPoint="0,0" EndPoint="0.4,1">
+                            <GradientStop Offset="0" Color="#1FA0C4FF" />
+                            <GradientStop Offset="1" Color="#0890B4FF" />
+                        </LinearGradientBrush>
+                    </Border.Background>
+                    <StackPanel Spacing="12">
+                        <Grid ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border
+                                Width="4"
+                                Height="20"
+                                VerticalAlignment="Center"
+                                Background="{ThemeResource ContactableAccentBrush}"
+                                CornerRadius="2" />
+                            <StackPanel Grid.Column="1" Spacing="1">
+                                <TextBlock FontSize="16" FontWeight="SemiBold" Text="常规" />
+                                <TextBlock
+                                    CharacterSpacing="100"
+                                    FontSize="10"
+                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                    Text="02 · GENERAL" />
+                            </StackPanel>
+                        </Grid>
+                        <Grid ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="2">
+                                <TextBlock Text="开机自启" />
+                                <TextBlock
+                                    FontSize="12"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="登录 Windows 后自动启动 Contactable Wallpaper 并恢复壁纸。"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                            <ToggleSwitch
+                                x:Name="StartupToggle"
+                                Grid.Column="1"
+                                MinWidth="0" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <Border
+                    Padding="18"
+                    Background="#1A6EA8FE"
+                    BorderBrush="{ThemeResource ContactableAccentBrush}"
+                    BorderThickness="1"
+                    CornerRadius="16">
+                    <StackPanel Spacing="12">
+                        <Grid ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border
+                                Width="4"
+                                Height="20"
+                                VerticalAlignment="Center"
+                                Background="#FFF59E0B"
+                                CornerRadius="2" />
+                            <StackPanel Grid.Column="1" Spacing="1">
+                                <TextBlock FontSize="16" FontWeight="SemiBold" Text="AI 生成" />
+                                <TextBlock
+                                    CharacterSpacing="100"
+                                    FontSize="10"
+                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                    Text="03 · PROVIDER" />
+                            </StackPanel>
+                        </Grid>
+                        <TextBlock
+                            FontSize="12"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            Text="用于“新建壁纸”的模型服务。API Key 以 DPAPI 加密保存在本机；环境变量 LIVELY_AI_* 优先。"
+                            TextWrapping="Wrap" />
+                        <TextBox
+                            x:Name="BaseUrlBox"
+                            Header="BaseUrl"
+                            PlaceholderText="https://api.openai.com/v1" />
+                        <TextBox
+                            x:Name="ModelBox"
+                            Header="Model"
+                            PlaceholderText="gpt-4o-mini" />
+                        <PasswordBox
+                            x:Name="ApiKeyBox"
+                            Header="API Key"
+                            PasswordRevealMode="Peek"
+                            PlaceholderText="留空表示不修改已保存的密钥" />
+                        <StackPanel Orientation="Horizontal" Spacing="10">
+                            <TextBlock
+                                VerticalAlignment="Center"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="密钥状态：" />
+                            <TextBlock
+                                x:Name="AiStatusText"
+                                VerticalAlignment="Center"
+                                FontWeight="SemiBold"
+                                Text="未配置" />
+                            <Button
+                                x:Name="ClearKeyButton"
+                                Click="ClearKeyButton_Click"
+                                Content="清除密钥" />
+                        </StackPanel>
+                        <Border
+                            Padding="10,8"
+                            Background="#1490B4FF"
+                            BorderBrush="{ThemeResource ContactableHairlineBrush}"
+                            BorderThickness="1"
+                            CornerRadius="10">
+                            <TextBlock
+                                FontSize="11"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="与“新建壁纸”页共用同一份 AiSettings.json，任一页修改后另一页重新进入即可看到最新状态。"
+                                TextWrapping="Wrap" />
+                        </Border>
+                    </StackPanel>
+                </Border>
+
+                <StackPanel
+                    HorizontalAlignment="Right"
+                    Orientation="Horizontal"
+                    Spacing="12">
+                    <ProgressRing
+                        x:Name="SaveRing"
+                        Width="20"
+                        Height="20"
+                        IsActive="False"
+                        Visibility="Collapsed" />
+                    <Button
+                        x:Name="SaveButton"
+                        MinWidth="132"
+                        Click="SaveButton_Click"
+                        Content="保存设置"
+                        Style="{StaticResource AccentButtonStyle}" />
+                </StackPanel>
+
+                <InfoBar
+                    x:Name="StatusBar"
+                    IsClosable="True"
+                    IsOpen="False" />
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</Page>

@@ -1,0 +1,28 @@
+﻿<Page
+    x:Class="Lively.UI.WinUI.Views.Pages.TrayMenuHelp"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:local="using:Lively.UI.WinUI.Views.Pages"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid>
+        <StackPanel Spacing="8">
+            <TextBlock
+                Name="txtBlock"
+                x:Uid="MinimizedTray"
+                TextWrapping="WrapWholeWords" />
+            <TextBlock
+                FontSize="12"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                Text="托盘菜单：打开主界面、暂停/继续壁纸、切换壁纸、退出。悬停图标可查看当前壁纸名称。"
+                TextWrapping="Wrap" />
+            <TextBlock
+                FontSize="12"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                Text="如果托盘图标被折叠，请到 Windows 任务栏设置中把 Contactable Wallpaper 设为“在任务栏上显示”。"
+                TextWrapping="Wrap" />
+        </StackPanel>
+    </Grid>
+</Page>
