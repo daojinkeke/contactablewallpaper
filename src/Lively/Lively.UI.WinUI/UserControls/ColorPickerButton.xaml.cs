@@ -9,7 +9,6 @@ using Lively.UI.WinUI.Views.LivelyProperty;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using Lively.UI.WinUI.Extensions;
-using System.Windows.Forms.VisualStyles;
 
 namespace Lively.UI.WinUI.UserControls
 {

@@ -4,7 +4,7 @@
 >
 > *An interactive AI desktop wallpaper app for Windows. Describe a scene to generate an HTML wallpaper, turn a photo into a depth-parallax wallpaper, and let the wallpaper respond to real mouse and keyboard input.*
 
-- 版本 / Version：2.2.1.5（AssemblyVersion）
+- 版本 / Version：2.2.1.10（AssemblyVersion）
 - 平台 / Platform：Windows 10 1903+ / Windows 11，x64
 - 许可证 / License：**GPL-3.0**（沿用上游，见 [LICENSE](./LICENSE)）
 
@@ -20,7 +20,7 @@ Contactable Wallpaper 是一个桌面壁纸宿主程序：
 - 在此基础上新增了 **AI 生成网页壁纸** 与 **照片转深度视差** 两条「一句话/一张图 → 直接可用的壁纸」链路；
 - 自带输入桥接层，让生成的网页壁纸无需额外改造即可接收桌面上的指针、滚轮、按键事件。
 
-界面包含四个主页面：**新建壁纸**、**壁纸库**、**预览**、**设置**；首次运行会把八张内置壁纸（`astral` / `aurora` / `lumen` / `ember` / `prism` / `dune` / `bloom` / `ink`）播种到本地壁纸库。
+界面包含四个主页面：**新建壁纸**、**壁纸库**、**预览**、**设置**；首次运行会把十三张内置壁纸（`astral` / `aurora` / `lumen` / `ember` / `prism` / `dune` / `bloom` / `ink` / `horizon` / `neon` / `misty-valley` / `neon-rain` / `silicon-core`）播种到本地壁纸库。
 
 | 能力 | 说明 |
 | --- | --- |
@@ -35,7 +35,7 @@ Contactable Wallpaper 是一个桌面壁纸宿主程序：
 
 ## 2. 与上游的关系与许可证（重要）
 
-**本仓库是 [Lively Wallpaper](https://github.com/rocksdanister/lively)（`core-separation` 分支，2.2.1.5）的衍生作品（derivative work）。**
+**本仓库是 [Lively Wallpaper](https://github.com/rocksdanister/lively)（`core-separation` 分支，2.2.1.10）的衍生作品（derivative work）。**
 
 - 许可证依据：仓库根目录的 [LICENSE](./LICENSE) 为上游原样保留的 **GNU General Public License v3.0**（GPL-3.0，全文 35,149 字节，未做任何改写）。
 - 因此本仓库同样以 **GPL-3.0** 发布，**不是** MIT/Apache 等宽松协议。
@@ -47,7 +47,7 @@ Contactable Wallpaper 是一个桌面壁纸宿主程序：
 - 本仓库相对上游的主要修改：
   - 新增 `Lively.Ai`（AI 生成、校验、自修复、会话）、`Lively.Ai.Cli`（命令行）、`Lively.Packaging`（壁纸打包）；
   - 新增 `Lively/Core/Interaction/*` 与 `Lively.Player.WebView2/Interaction/*`（桌面输入桥接）及对应设置项；
-  - 新增 `Lively/Assets/DefaultWallpapers/*` 八张内置壁纸；
+  - 新增 `Lively/Assets/DefaultWallpapers/*` 十三张内置壁纸；
   - 界面改为「新建壁纸 / 壁纸库 / 预览 / 设置」四页，替换为自制的黑洞风格图标；
   - 新增 `installer/ContactableWallpaper.iss` 与 `scripts/publish.ps1`、`scripts/package.ps1`；
   - 移除指向上游官网/社区/赞助的链接与在线更新跳转，更新页改为静态说明。
@@ -278,7 +278,7 @@ Lively.Ai.Cli depth --image "C:\photo.jpg" --out "C:\wallpapers\photo-depth"
 | Three.js（深度模板，随模型包分发） | three.js | MIT |
 | depthmap-wallpaper 模板 | rocksdanister | MIT（生成产物中随附 `License.txt`） |
 | icons8 图标素材 | https://icons8.com | icons8 免费许可（要求保留来源链接） |
-| 内置壁纸 `astral` / `aurora` / `lumen` | 本项目自制 | GPL-3.0 |
+| 内置壁纸（`astral`、`aurora`、`lumen` 等共 13 张） | 本项目自制 | GPL-3.0 |
 | 界面图标（黑洞系列）、`CustomIcons.ttf` | 本项目自制 | GPL-3.0 |
 
 未包含在仓库中的内容（需自行获取）：MiDaS 权重、WebView2 运行时、Cef/libvlc 原生库（NuGet 还原）、安装包构建工具。

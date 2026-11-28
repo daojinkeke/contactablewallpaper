@@ -70,7 +70,7 @@ namespace Lively.Player.WebView2
             var text = "此壁纸需要 Microsoft Edge WebView2 运行时才能播放，但系统没有检测到它。" + Environment.NewLine + Environment.NewLine +
                        "点“是”打开官方下载页，安装完成后重新应用这张壁纸即可；已安装但仍看到此提示时，请重启应用再试一次。";
 
-            var result = MessageBox.Show(text, "Lively",
+            var result = MessageBox.Show(text, "Contactable Wallpaper",
                 MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button1);
 
             if (result == DialogResult.Yes)

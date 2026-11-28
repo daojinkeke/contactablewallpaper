@@ -23,6 +23,7 @@
         radial-gradient(120% 90% at 50% 108%, #0b2036 0%, #050c18 46%, #03060d 100%);
       cursor: default;
       user-select: none;
+      -webkit-user-select: none;
       animation: appear 1.8s ease .1s both;
     }
 
@@ -39,6 +40,10 @@
     #sky {
       position: fixed;
       inset: 0;
+      /* canvas 是替换元素，仅靠 inset 无法撑满视口：width/height:auto 会退回
+         画布属性的固有尺寸（W×DPR），在非 1 倍缩放下画面被放大裁切、点击偏移。 */
+      width: 100%;
+      height: 100%;
       display: block;
     }
 
@@ -77,187 +82,490 @@
       var ctx = canvas.getContext('2d', { alpha: false });
       var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-      var width = 0;
-      var height = 0;
-      var dpr = 1;
-      var background = null;
-      var ambientTeal = null;
-      var ambientIndigo = null;
-
-      var pointerX = 0;
-      var pointerY = 0;
-      var targetX = 0;
-      var targetY = 0;
-
-      // Each ribbon: baseline height, amplitude, wavelength count, drift speed, colour.
-      var ribbons = [
-        { y: 0.50, amp: 0.085, freq: 1.15, speed: 0.055, width: 0.045, color: [74, 232, 204], alpha: 0.55 },
-        { y: 0.62, amp: 0.070, freq: 1.65, speed: -0.041, width: 0.032, color: [112, 166, 255], alpha: 0.48 },
-        { y: 0.44, amp: 0.055, freq: 2.35, speed: 0.033, width: 0.020, color: [188, 138, 255], alpha: 0.42 }
-      ];
+      var W = 0, H = 0, dpr = 1;
+      var bg = null, horizon = null, mist = null;
+      var pointer = { x: 0.5, y: 0.5, sx: 0.5, sy: 0.5, active: false };
 
       var stars = [];
+      var meteors = [];
+      var flares = [];
+      var milky = [];
+      var mountains = [];
+      var cloudSprite = null;
+      var meteorTimer = 0;
+
+      var lastInput = performance.now(), eco = 0, lastDraw = 0, time = 0;
+      var hueShift = 0;
+      var speedScale = 1;
+      var boost = 0;
+
+      /* 三层极光帘幕：高度、振幅、频率、漂移速度、色相、亮度。 */
+      var curtains = [
+        { base: 0.440, amp: 0.070, freq: 1.05, speed: 0.070, height: 0.50, hue: 166, alpha: 0.30, depth: 0.34, width: 6.5, phase: 0.4 },
+        { base: 0.565, amp: 0.058, freq: 1.58, speed: -0.052, height: 0.40, hue: 204, alpha: 0.27, depth: 0.20, width: 5.2, phase: 2.1 },
+        { base: 0.385, amp: 0.044, freq: 2.24, speed: 0.041, height: 0.31, hue: 272, alpha: 0.21, depth: 0.54, width: 4.2, phase: 4.3 }
+      ];
+
+      function clamp(v, a, b) {
+        return v < a ? a : (v > b ? b : v);
+      }
+
+      function rand(a, b) {
+        return a + Math.random() * (b - a);
+      }
+
+      function markInput() {
+        lastInput = performance.now();
+        eco = 0;
+      }
+
+      function buildCloudSprite() {
+        cloudSprite = document.createElement('canvas');
+        cloudSprite.width = 64;
+        cloudSprite.height = 64;
+        var g = cloudSprite.getContext('2d');
+        var grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+        grad.addColorStop(0, 'rgba(198, 226, 255, 0.55)');
+        grad.addColorStop(0.45, 'rgba(150, 190, 255, 0.16)');
+        grad.addColorStop(1, 'rgba(120, 160, 255, 0)');
+        g.fillStyle = grad;
+        g.fillRect(0, 0, 64, 64);
+      }
 
       function makeStars() {
-        var count = Math.round(Math.min(320, Math.max(120, width * height / 9000)));
+        var count = Math.round(clamp(W * H / 7200, 150, 460));
         stars = [];
         for (var i = 0; i < count; i++) {
           stars.push({
             x: Math.random(),
-            y: Math.random() * 0.86,
-            r: 0.5 + Math.random() * 1.6,
-            a: 0.3 + Math.random() * 0.62,
-            speed: 0.4 + Math.random() * 1.4,
+            y: Math.pow(Math.random(), 1.25) * 0.9,
+            r: 0.4 + Math.random() * 1.7,
+            a: 0.18 + Math.random() * 0.7,
+            speed: 0.4 + Math.random() * 1.8,
             phase: Math.random() * TAU,
-            depth: 0.2 + Math.random() * 0.8
+            depth: 0.15 + Math.random() * 0.85
+          });
+        }
+        // 少量偏暖、偏青的亮星，避免整片星空同色。
+        for (var j = 0; j < 14; j++) {
+          stars.push({
+            x: Math.random(),
+            y: Math.random() * 0.7,
+            r: 1.3 + Math.random() * 1.5,
+            a: 0.7 + Math.random() * 0.3,
+            speed: 0.3 + Math.random() * 0.9,
+            phase: Math.random() * TAU,
+            depth: 0.5 + Math.random() * 0.5,
+            warm: Math.random() > 0.5
           });
         }
       }
 
+      function makeMilkyWay() {
+        milky = [];
+        var angle = -0.52;
+        var cx = W * 0.52, cy = H * 0.34;
+        for (var i = 0; i < 120; i++) {
+          var u = i / 119 - 0.5;
+          var along = u * W * 1.5;
+          var spread = (Math.random() - 0.5) * H * 0.24 * (1 - Math.abs(u) * 0.7);
+          milky.push({
+            x: cx + Math.cos(angle) * along - Math.sin(angle) * spread,
+            y: cy + Math.sin(angle) * along + Math.cos(angle) * spread,
+            r: rand(36, 120),
+            a: rand(0.012, 0.05) * (1 - Math.abs(u) * 1.4)
+          });
+        }
+      }
+
+      function makeMountains() {
+        var cfg = [
+          { base: 0.795, amp: 0.115, color: '#060c17', rim: 0.10, depth: 12 },
+          { base: 0.875, amp: 0.082, color: '#040813', rim: 0.06, depth: 22 },
+          { base: 0.955, amp: 0.058, color: '#02040a', rim: 0.03, depth: 34 }
+        ];
+        mountains = [];
+        for (var i = 0; i < cfg.length; i++) {
+          var c = cfg[i];
+          var pts = [];
+          var seeds = [Math.random() * TAU, Math.random() * TAU, Math.random() * TAU];
+          var step = 9;
+          for (var x = -40; x <= W + 40; x += step) {
+            var u = x / Math.max(1, W);
+            var y = H * c.base
+              - Math.abs(Math.sin(u * 5.3 + seeds[0])) * H * c.amp
+              - Math.abs(Math.sin(u * 11.7 + seeds[1])) * H * c.amp * 0.42
+              - Math.sin(u * 23.1 + seeds[2]) * H * c.amp * 0.16;
+            pts.push({ x: x, y: y });
+          }
+          mountains.push({ pts: pts, color: c.color, rim: c.rim, depth: c.depth });
+        }
+      }
+
       function resize() {
-        width = window.innerWidth;
-        height = window.innerHeight;
+        var rect = canvas.getBoundingClientRect();
+        W = rect.width || window.innerWidth;
+        H = rect.height || window.innerHeight;
         dpr = Math.min(2, window.devicePixelRatio || 1);
 
-        canvas.width = Math.round(width * dpr);
-        canvas.height = Math.round(height * dpr);
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.imageSmoothingEnabled = true;
 
-        background = ctx.createRadialGradient(
-          width * 0.5, height * 1.06, height * 0.05,
-          width * 0.5, height * 1.06, height * 1.12);
-        background.addColorStop(0, '#0e2c48');
-        background.addColorStop(0.45, '#071426');
-        background.addColorStop(1, '#03060d');
+        bg = ctx.createLinearGradient(0, 0, 0, H);
+        bg.addColorStop(0, '#030711');
+        bg.addColorStop(0.42, '#061426');
+        bg.addColorStop(0.72, '#07203a');
+        bg.addColorStop(1, '#03060d');
 
-        ambientTeal = ctx.createRadialGradient(
-          width * 0.5, height * 0.62, 0,
-          width * 0.5, height * 0.62, height * 0.58);
-        ambientTeal.addColorStop(0, 'rgba(46, 190, 170, 0.17)');
-        ambientTeal.addColorStop(0.55, 'rgba(30, 110, 150, 0.07)');
-        ambientTeal.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        horizon = ctx.createRadialGradient(W * 0.5, H * 0.92, 0, W * 0.5, H * 0.92, Math.max(W, H) * 0.62);
+        horizon.addColorStop(0, 'rgba(64, 178, 190, 0.16)');
+        horizon.addColorStop(0.45, 'rgba(40, 116, 168, 0.07)');
+        horizon.addColorStop(1, 'rgba(0, 0, 0, 0)');
 
-        ambientIndigo = ctx.createRadialGradient(
-          width * 0.28, height * 0.28, 0,
-          width * 0.28, height * 0.28, height * 0.62);
-        ambientIndigo.addColorStop(0, 'rgba(104, 104, 226, 0.12)');
-        ambientIndigo.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        mist = ctx.createLinearGradient(0, H * 0.62, 0, H * 0.95);
+        mist.addColorStop(0, 'rgba(120, 190, 210, 0)');
+        mist.addColorStop(0.62, 'rgba(118, 186, 206, 0.055)');
+        mist.addColorStop(1, 'rgba(90, 150, 190, 0)');
 
         makeStars();
+        makeMilkyWay();
+        makeMountains();
       }
 
-      function drawStars(t) {
+      function drawMilkyWay() {
+        ctx.globalCompositeOperation = 'lighter';
+        for (var i = 0; i < milky.length; i++) {
+          var m = milky[i];
+          ctx.globalAlpha = m.a * (reduceMotion ? 1 : (0.85 + 0.15 * Math.sin(time * 0.3 + i)));
+          ctx.drawImage(cloudSprite, m.x - m.r, m.y - m.r, m.r * 2, m.r * 2);
+        }
+        ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = 'source-over';
+      }
+
+      function drawStars() {
         for (var i = 0; i < stars.length; i++) {
           var s = stars[i];
-          var twinkle = reduceMotion ? 0.7 : 0.55 + 0.45 * Math.sin(t * s.speed + s.phase);
-          ctx.globalAlpha = s.a * twinkle;
-          ctx.fillStyle = '#dff0ff';
-          var px = s.x * width + pointerX * 16 * s.depth;
-          var py = s.y * height + pointerY * 9 * s.depth;
+          var tw = reduceMotion ? 0.72 : 0.5 + 0.5 * Math.sin(time * s.speed + s.phase);
+          var px = s.x * W + (pointer.sx - 0.5) * 38 * s.depth;
+          var py = s.y * H + (pointer.sy - 0.5) * 20 * s.depth;
+          ctx.globalAlpha = s.a * tw;
+          ctx.fillStyle = s.warm ? '#ffeede' : '#dceeff';
           ctx.beginPath();
           ctx.arc(px, py, s.r, 0, TAU);
           ctx.fill();
-        }
-        ctx.globalAlpha = 1;
-      }
-
-      function ribbonPath(ribbon, t) {
-        var step = Math.max(6, width / 190);
-        var phase = t * ribbon.speed + (reduceMotion ? 1.2 : 0);
-        var wobble = ribbon.freq * 2.71;
-        ctx.beginPath();
-        for (var x = -step; x <= width + step; x += step) {
-          var u = x / Math.max(1, width);
-          var y = ribbon.y * height
-            + Math.sin(u * TAU * ribbon.freq + phase) * ribbon.amp * height
-            + Math.sin(u * TAU * wobble - phase * 1.6) * ribbon.amp * 0.34 * height
-            + pointerY * 18;
-          if (x <= -step + 0.01) {
-            ctx.moveTo(x + pointerX * 22, y);
-          } else {
-            ctx.lineTo(x + pointerX * 22, y);
+          if (s.r > 1.7) {
+            ctx.globalAlpha = s.a * tw * 0.24;
+            ctx.beginPath();
+            ctx.arc(px, py, s.r * 3.6, 0, TAU);
+            ctx.fill();
           }
         }
+        ctx.globalAlpha = 1;
       }
 
-      function drawRibbon(ribbon, t) {
-        var c = ribbon.color;
-        var lineWidth = Math.max(10, ribbon.width * height);
+      function curtainPath(c, t, offsetX, offsetY) {
+        var step = Math.max(6, W / 200);
+        ctx.beginPath();
+        for (var x = -step; x <= W + step; x += step) {
+          var u = x / Math.max(1, W);
+          var y = c.base * H
+            + Math.sin(u * TAU * c.freq + t * c.speed * speedScale + c.phase) * c.amp * H
+            + Math.sin(u * TAU * c.freq * 2.17 - t * c.speed * 0.72 + c.phase * 1.7) * c.amp * H * 0.42
+            + Math.sin(u * TAU * c.freq * 0.47 + t * c.speed * 0.31 + c.phase) * c.amp * H * 0.26
+            + offsetY;
+          if (x <= -step + 0.01) ctx.moveTo(x + offsetX, y);
+          else ctx.lineTo(x + offsetX, y);
+        }
+      }
+
+      function drawCurtain(c, t) {
+        var hue = (c.hue + hueShift + 360) % 360;
+        var xOff = (pointer.sx - 0.5) * 26 * c.depth;
+        var yOff = (pointer.sy - 0.5) * 22 * c.depth;
+        var cx = W * 0.5;
+
+        // 垂直光衰减：光带中心亮、上下自然消隐。
+        var band = ctx.createLinearGradient(0, c.base * H - H * 0.16, 0, c.base * H + H * 0.07);
+        band.addColorStop(0, 'hsla(' + hue + ', 96%, 68%, 0)');
+        band.addColorStop(0.34, 'hsla(' + hue + ', 96%, 66%, 0.42)');
+        band.addColorStop(0.52, 'hsla(' + hue + ', 100%, 78%, 0.85)');
+        band.addColorStop(0.72, 'hsla(' + hue + ', 94%, 62%, 0.34)');
+        band.addColorStop(1, 'hsla(' + hue + ', 90%, 56%, 0)');
+
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        // 三层由宽到窄的光带 + 一层上浮淡帘，形成柔和的体积与层次。
         var passes = [
-          { w: lineWidth * 3.4, a: ribbon.alpha * 0.26 },
-          { w: lineWidth * 1.7, a: ribbon.alpha * 0.58 },
-          { w: lineWidth * 0.55, a: ribbon.alpha }
+          { w: Math.max(34, H * 0.20), a: 0.16 + boost * 0.08, dy: 0, hue: hue },
+          { w: Math.max(15, H * 0.09), a: 0.28 + boost * 0.12, dy: 0, hue: hue },
+          { w: Math.max(5, H * 0.028), a: 0.44 + boost * 0.16, dy: 0, hue: hue },
+          { w: Math.max(30, H * 0.16), a: 0.10 + boost * 0.05, dy: -H * 0.075, hue: (hue + 26) % 360 }
         ];
-
         for (var p = 0; p < passes.length; p++) {
-          var gradient = ctx.createLinearGradient(0, ribbon.y * height - lineWidth * 2, 0, ribbon.y * height + lineWidth * 2);
-          gradient.addColorStop(0, 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',0)');
-          gradient.addColorStop(0.5, 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + passes[p].a + ')');
-          gradient.addColorStop(1, 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',0)');
-
-          ctx.globalCompositeOperation = 'lighter';
-          ctx.strokeStyle = gradient;
-          ctx.lineWidth = passes[p].w;
-          ctx.lineCap = 'round';
-          ctx.lineJoin = 'round';
-          ribbonPath(ribbon, t);
+          var pass = passes[p];
+          var passBand = band;
+          if (pass.hue !== hue) {
+            passBand = ctx.createLinearGradient(0, c.base * H - H * 0.16, 0, c.base * H + H * 0.07);
+            passBand.addColorStop(0, 'hsla(' + pass.hue + ', 96%, 68%, 0)');
+            passBand.addColorStop(0.36, 'hsla(' + pass.hue + ', 96%, 66%, 0.34)');
+            passBand.addColorStop(0.54, 'hsla(' + pass.hue + ', 100%, 76%, 0.62)');
+            passBand.addColorStop(1, 'hsla(' + pass.hue + ', 92%, 58%, 0)');
+          }
+          ctx.globalAlpha = Math.min(1, pass.a * (1 + boost * 0.5));
+          ctx.strokeStyle = passBand;
+          ctx.lineWidth = pass.w;
+          curtainPath(c, t, xOff, yOff + pass.dy);
           ctx.stroke();
         }
-        ctx.globalCompositeOperation = 'source-over';
+
+        // 帘幕核心的一条细亮线，让极光边缘有清晰的走向。
+        ctx.globalAlpha = Math.min(0.65, 0.22 + boost * 0.3);
+        ctx.strokeStyle = 'hsla(' + hue + ', 100%, 88%, 0.85)';
+        ctx.lineWidth = 1.3;
+        curtainPath(c, t, xOff, yOff);
+        ctx.stroke();
+
         ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = 'source-over';
+      }
+
+      function drawMountains() {
+        for (var i = 0; i < mountains.length; i++) {
+          var m = mountains[i];
+          var shift = (pointer.sx - 0.5) * m.depth;
+          var lift = (pointer.sy - 0.5) * m.depth * 0.22;
+          var pts = m.pts;
+
+          ctx.beginPath();
+          ctx.moveTo(pts[0].x + shift, H + 10);
+          for (var j = 0; j < pts.length; j++) {
+            ctx.lineTo(pts[j].x + shift, pts[j].y - lift);
+          }
+          ctx.lineTo(pts[pts.length - 1].x + shift, H + 10);
+          ctx.closePath();
+          ctx.fillStyle = m.color;
+          ctx.fill();
+
+          // 山脊被极光映亮的一线轮廓。
+          ctx.beginPath();
+          for (var k = 0; k < pts.length; k++) {
+            if (k === 0) ctx.moveTo(pts[k].x + shift, pts[k].y - lift);
+            else ctx.lineTo(pts[k].x + shift, pts[k].y - lift);
+          }
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.strokeStyle = 'rgba(126, 214, 220, ' + m.rim * (0.55 + boost * 0.8) + ')';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+          ctx.globalCompositeOperation = 'source-over';
+        }
       }
 
       function drawPointerGlow() {
-        if (pointerX === 0 && pointerY === 0) return;
-        var gx = (pointerX * 0.5 + 0.5) * width;
-        var gy = (pointerY * 0.5 + 0.5) * height;
-        var glow = ctx.createRadialGradient(gx, gy, 0, gx, gy, Math.max(width, height) * 0.22);
-        glow.addColorStop(0, 'rgba(120, 226, 210, 0.10)');
-        glow.addColorStop(0.45, 'rgba(70, 150, 220, 0.05)');
+        if (!pointer.active) return;
+        var gx = pointer.sx * W;
+        var gy = pointer.sy * H;
+        var r = Math.max(140, Math.min(W, H) * 0.26);
+        var glow = ctx.createRadialGradient(gx, gy, 0, gx, gy, r);
+        glow.addColorStop(0, 'rgba(110, 236, 212, 0.12)');
+        glow.addColorStop(0.42, 'rgba(72, 156, 224, 0.055)');
         glow.addColorStop(1, 'rgba(0, 0, 0, 0)');
         ctx.globalCompositeOperation = 'lighter';
         ctx.fillStyle = glow;
-        ctx.fillRect(0, 0, width, height);
+        ctx.fillRect(0, 0, W, H);
         ctx.globalCompositeOperation = 'source-over';
       }
 
-      var start = performance.now();
+      function drawFlares() {
+        ctx.globalCompositeOperation = 'lighter';
+        for (var i = 0; i < flares.length; i++) {
+          var f = flares[i];
+          var r = f.r;
+          var g = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, r);
+          g.addColorStop(0, 'rgba(190, 255, 244, ' + (f.life * 0.5) + ')');
+          g.addColorStop(0.25, 'hsla(' + ((f.hue + hueShift) % 360) + ', 92%, 68%, ' + (f.life * 0.24) + ')');
+          g.addColorStop(1, 'hsla(' + ((f.hue + hueShift) % 360) + ', 90%, 60%, 0)');
+          ctx.fillStyle = g;
+          ctx.beginPath();
+          ctx.arc(f.x, f.y, r, 0, TAU);
+          ctx.fill();
 
-      function frame(now) {
-        var t = reduceMotion ? 4.2 : (now - start) / 1000;
-        pointerX += (targetX - pointerX) * 0.045;
-        pointerY += (targetY - pointerY) * 0.045;
-
+          ctx.strokeStyle = 'rgba(198, 255, 246, ' + (f.life * 0.3) + ')';
+          ctx.lineWidth = 1.4;
+          ctx.beginPath();
+          ctx.moveTo(f.x - r * 1.5, f.y);
+          ctx.lineTo(f.x + r * 1.5, f.y);
+          ctx.stroke();
+        }
         ctx.globalCompositeOperation = 'source-over';
-        ctx.fillStyle = background;
-        ctx.fillRect(0, 0, width, height);
+      }
+
+      function drawMeteors() {
+        ctx.globalCompositeOperation = 'lighter';
+        for (var i = 0; i < meteors.length; i++) {
+          var m = meteors[i];
+          var g = ctx.createLinearGradient(m.x, m.y, m.x - m.dx * 9, m.y - m.dy * 9);
+          g.addColorStop(0, 'rgba(224, 244, 255, ' + (m.life * 0.85) + ')');
+          g.addColorStop(1, 'rgba(150, 210, 255, 0)');
+          ctx.strokeStyle = g;
+          ctx.lineWidth = m.w;
+          ctx.beginPath();
+          ctx.moveTo(m.x, m.y);
+          ctx.lineTo(m.x - m.dx * 9, m.y - m.dy * 9);
+          ctx.stroke();
+        }
+        ctx.globalCompositeOperation = 'source-over';
+      }
+
+      function spawnMeteor() {
+        if (reduceMotion) return;
+        var fromLeft = Math.random() > 0.5;
+        meteors.push({
+          x: fromLeft ? rand(-0.05, 0.5) * W : rand(0.5, 1.05) * W,
+          y: rand(0.02, 0.34) * H,
+          dx: (fromLeft ? 1 : -1) * rand(2.6, 5.2),
+          dy: rand(1.4, 2.6),
+          w: rand(1, 2.2),
+          life: 1
+        });
+      }
+
+      function update(dt, t) {
+        boost *= Math.pow(0.06, dt);
+        for (var i = meteors.length - 1; i >= 0; i--) {
+          var m = meteors[i];
+          m.x += m.dx * dt * 90;
+          m.y += m.dy * dt * 90;
+          m.life -= dt * 0.72;
+          if (m.life <= 0) meteors.splice(i, 1);
+        }
+        for (var j = flares.length - 1; j >= 0; j--) {
+          var f = flares[j];
+          f.r += dt * Math.max(W, H) * 0.55;
+          f.life -= dt * 1.05;
+          if (f.life <= 0) flares.splice(j, 1);
+        }
+        meteorTimer -= dt;
+        if (meteorTimer <= 0) {
+          meteorTimer = rand(3.2, 8.5);
+          spawnMeteor();
+        }
+        pointer.sx += (pointer.x - pointer.sx) * Math.min(1, dt * 3.2);
+        pointer.sy += (pointer.y - pointer.sy) * Math.min(1, dt * 3.2);
+      }
+
+      function draw(t) {
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, W, H);
+
+        drawMilkyWay();
+        drawStars();
 
         ctx.globalCompositeOperation = 'lighter';
-        ctx.fillStyle = ambientTeal;
-        ctx.fillRect(0, 0, width, height);
-        ctx.fillStyle = ambientIndigo;
-        ctx.fillRect(0, 0, width, height);
+        ctx.fillStyle = horizon;
+        ctx.fillRect(0, 0, W, H);
+        ctx.globalCompositeOperation = 'source-over';
+
+        for (var i = 0; i < curtains.length; i++) drawCurtain(curtains[i], t);
+
+        drawMountains();
+
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.fillStyle = mist;
+        ctx.fillRect(0, 0, W, H);
         ctx.globalCompositeOperation = 'source-over';
 
         drawPointerGlow();
-        for (var i = 0; i < ribbons.length; i++)
-          drawRibbon(ribbons[i], t);
-        drawStars(t);
+        drawFlares();
+        drawMeteors();
+      }
 
+      function frame(now) {
+        var idle = now - lastInput;
+        var target = idle > 4500 ? 1 : 0;
+        eco += (target - eco) * 0.045;
+        var step = 1000 / (60 - eco * 30);
+        if (now - lastDraw < step - 1) {
+          requestAnimationFrame(frame);
+          return;
+        }
+        var dt = Math.min(0.1, (now - lastDraw) / 1000);
+        lastDraw = now;
+        if (!reduceMotion) time += dt;
+        var t = reduceMotion ? 2.6 : time;
+        update(dt, t);
+        draw(t);
         requestAnimationFrame(frame);
+      }
+
+      function fireFlare(x, y) {
+        var hue = (curtains[0].hue + hueShift) % 360;
+        flares.push({ x: x, y: y, r: 8, life: 1, hue: hue });
+        // 同时在帘幕上压出一层短暂的高光带。
+        flares.push({ x: x, y: y * 0.62, r: 30, life: 0.72, hue: hue });
+        boost = 1;
+      }
+
+      // 事件坐标统一换算为画布内的 0~1 比例，兼容 DPR、缩放与画布偏移。
+      function toLocal(e) {
+        var rect = canvas.getBoundingClientRect();
+        var sx = W / Math.max(1, rect.width);
+        var sy = H / Math.max(1, rect.height);
+        var lx = e.clientX - rect.left;
+        var ly = e.clientY - rect.top;
+        return {
+          x: clamp(lx / Math.max(1, rect.width), 0, 1),
+          y: clamp(ly / Math.max(1, rect.height), 0, 1),
+          px: lx * sx,
+          py: ly * sy
+        };
       }
 
       window.addEventListener('resize', resize);
       window.addEventListener('pointermove', function (e) {
-        targetX = (e.clientX / Math.max(1, width)) * 2 - 1;
-        targetY = (e.clientY / Math.max(1, height)) * 2 - 1;
+        var p = toLocal(e);
+        pointer.x = p.x;
+        pointer.y = p.y;
+        pointer.active = true;
+        markInput();
       });
       window.addEventListener('pointerleave', function () {
-        targetX = 0;
-        targetY = 0;
+        pointer.active = false;
+        pointer.x = 0.5;
+        pointer.y = 0.5;
+      });
+      window.addEventListener('pointerdown', function (e) {
+        var p = toLocal(e);
+        fireFlare(p.px, p.py);
+        meteors.push({
+          x: p.px, y: p.py,
+          dx: rand(-1, 1), dy: rand(0.6, 1.4),
+          w: 1.6, life: 1
+        });
+        markInput();
+      });
+      window.addEventListener('keydown', function (e) {
+        if (e.key === ' ') {
+          e.preventDefault();
+          fireFlare(W * (0.32 + Math.random() * 0.36), H * 0.42);
+        } else if (e.key === 'ArrowLeft') {
+          hueShift = (hueShift - 18 + 360) % 360;
+        } else if (e.key === 'ArrowRight') {
+          hueShift = (hueShift + 18) % 360;
+        } else if (e.key === 'ArrowUp') {
+          speedScale = Math.min(2.6, speedScale + 0.22);
+        } else if (e.key === 'ArrowDown') {
+          speedScale = Math.max(0.15, speedScale - 0.22);
+        }
+        markInput();
       });
 
+      buildCloudSprite();
       resize();
       // 先同步绘制一帧，避免后台节流或截图时出现空白。
       frame(performance.now());

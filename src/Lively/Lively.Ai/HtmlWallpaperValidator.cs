@@ -45,19 +45,6 @@ namespace Lively.Ai
             @"<meta\b[^>]*charset\s*=\s*[""']?\s*utf-8",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-        /// <summary>交互监听扫描（V009）：原生 DOM 事件即可，不限定写法。</summary>
-        private static readonly Regex PointerMoveRegex = new Regex(
-            @"addEventListener\s*\(\s*[""'](?:pointermove|mousemove|touchmove)[""']|\.on(?:pointer|mouse)move\s*=|[\s""']onmousemove\s*=",
-            RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
-        private static readonly Regex PointerDownRegex = new Regex(
-            @"addEventListener\s*\(\s*[""'](?:pointerdown|mousedown|click|touchstart)[""']|\.on(?:pointer|mouse)down\s*=|[\s""']on(?:mousedown|click|pointerdown)\s*=",
-            RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
-        private static readonly Regex KeyRegex = new Regex(
-            @"addEventListener\s*\(\s*[""'](?:keydown|keyup)[""']|\.onkey(?:down|up)\s*=|[\s""']onkey(?:down|up)\s*=",
-            RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
         /// <summary>07 契约 §6.2 禁用 API 扫描表。</summary>
         private static readonly string[] BannedPatterns =
         {
@@ -127,8 +114,8 @@ namespace Lively.Ai
                 return result;
             }
 
-            // V004 离线模式外链资源。
-            if (options.OfflineRequired && ExternalResourceRegex.IsMatch(html))
+            // V004 离线模式外链资源；允许外部联网时跳过。
+            if (options.OfflineRequired && !options.AllowExternalNetwork && ExternalResourceRegex.IsMatch(html))
             {
                 result.IsValid = false;
                 result.Issues.Add(new ValidationIssue("V004", ValidationSeverity.fatal,
@@ -184,28 +171,7 @@ namespace Lively.Ai
                     CheckCanvasSize(result, canvas.Groups[2].Value, canvas.Groups[1].Value, options);
             }
 
-            // V009 交互能力：要求交互时，页面必须真的监听了对应事件。
-            if (options.RequiredInteraction != InteractionCapability.none)
-            {
-                var hasMove = PointerMoveRegex.IsMatch(html);
-                var hasDown = PointerDownRegex.IsMatch(html);
-                var missing = new List<string>();
-                if ((options.RequiredInteraction & InteractionCapability.hover) != 0 && !hasMove)
-                    missing.Add("hover（pointermove/mousemove）");
-                if ((options.RequiredInteraction & InteractionCapability.click) != 0 && !hasDown)
-                    missing.Add("click（pointerdown/click）");
-                if ((options.RequiredInteraction & InteractionCapability.drag) != 0 && !(hasMove && hasDown))
-                    missing.Add("drag（pointerdown + pointermove）");
-                if ((options.RequiredInteraction & InteractionCapability.keyboard) != 0 && !KeyRegex.IsMatch(html))
-                    missing.Add("keyboard（keydown/keyup）");
-                if (missing.Count > 0)
-                {
-                    result.Issues.Add(new ValidationIssue("V009", ValidationSeverity.fatal,
-                        "缺少要求的交互监听：" + string.Join("、", missing) +
-                        "。交互必须使用原生 DOM 事件驱动画面，并在空闲时保持完整动画。"));
-                }
-            }
-
+            // 交互是可选项，不再做生成完成后的交互监听检测；仅保留美观/离线/尺寸等硬约束。
             result.IsValid = !result.HasFatal;
             return result;
         }

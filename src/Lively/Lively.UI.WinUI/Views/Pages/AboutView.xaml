@@ -54,7 +54,7 @@
                         <TextBlock
                             FontSize="12"
                             Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                            Text="• 网页壁纸：使用设置页配置的 BaseUrl / Model / ApiKey 生成，素材只保存在本机壁纸库。"
+                            Text="• 网页壁纸：只需在设置页粘贴 API Key，应用会自动识别服务商与模型；素材只保存在本机壁纸库。"
                             TextWrapping="Wrap" />
                         <TextBlock
                             FontSize="12"

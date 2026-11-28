@@ -92,5 +92,11 @@ namespace Lively.Player.WebView2
         Required = false,
         HelpText = "Set PreferredColorScheme.")]
         public AppTheme Theme { get; set; }
+
+        [Option("wallpaper-allow-network",
+        Required = false,
+        Default = false,
+        HelpText = "Allow the local html wallpaper to access external network.")]
+        public bool AllowExternalNetwork { get; set; }
     }
 }

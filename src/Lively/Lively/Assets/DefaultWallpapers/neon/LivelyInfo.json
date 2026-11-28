@@ -1,0 +1,20 @@
+{
+  "AppVersion": "2.2.1.5",
+  "Title": "霓虹夜雨",
+  "Thumbnail": "thumbnail.jpg",
+  "Preview": null,
+  "Desc": "雨夜霓虹都市的像素街景，指针扰动雨幕，点击扩散一圈霓虹波纹。",
+  "Author": "Contactable Wallpaper",
+  "License": "",
+  "Contact": "",
+  "Type": 1,
+  "FileName": "index.html",
+  "Arguments": null,
+  "IsAbsolutePath": false,
+  "Id": null,
+  "Tags": [
+    "赛博",
+    "像素"
+  ],
+  "Version": 1
+}

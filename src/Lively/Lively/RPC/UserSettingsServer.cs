@@ -168,6 +168,8 @@ namespace Lively.RPC
             userSettings.Settings.InteractionEnabled = req.InteractionEnabled;
             userSettings.Settings.InteractionForwardWheel = req.InteractionForwardWheel;
             userSettings.Settings.InteractionForwardMiddleButton = req.InteractionForwardMiddleButton;
+            userSettings.Settings.InteractionForwardKeyboard = req.InteractionForwardKeyboard;
+            userSettings.Settings.AllowExternalNetwork = req.AllowExternalNetwork;
             userSettings.Settings.TileSize = req.TileSize;
             userSettings.Settings.UIMode = (LivelyGUIState)((int)req.LivelyGuiRendering);
             userSettings.Settings.WallpaperDir = req.WallpaperDir;
@@ -287,6 +289,8 @@ namespace Lively.RPC
                 InteractionEnabled = settings.InteractionEnabled,
                 InteractionForwardWheel = settings.InteractionForwardWheel,
                 InteractionForwardMiddleButton = settings.InteractionForwardMiddleButton,
+                InteractionForwardKeyboard = settings.InteractionForwardKeyboard,
+                AllowExternalNetwork = settings.AllowExternalNetwork,
                 TileSize = settings.TileSize,
                 LivelyGuiRendering = (GuiMode)settings.UIMode,
                 WallpaperDir = settings.WallpaperDir,

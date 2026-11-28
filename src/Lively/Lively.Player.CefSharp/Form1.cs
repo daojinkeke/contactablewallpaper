@@ -1,4 +1,4 @@
-﻿using CefSharp;
+﻿﻿using CefSharp;
 using CefSharp.SchemeHandler;
 using CefSharp.WinForms;
 using CommandLine;
@@ -31,6 +31,7 @@ namespace Lively.Player.CefSharp
 
         private bool initializedServices = false; //delay API init till loaded page
         private IHardwareUsageService hardwareUsageService;
+        private IHardwareUsageService hostStatsService;
         private IAudioVisualizerService audioVisualizerService;
         private INowPlayingService nowPlayingService;
         private int cefD3DRenderingSubProcessId;
@@ -324,6 +325,7 @@ namespace Lively.Player.CefSharp
         {
             audioVisualizerService?.Dispose();
             hardwareUsageService?.Stop();
+            hostStatsService?.Stop();
             nowPlayingService?.Stop();
             chromeBrowser?.Dispose();
             Cef.Shutdown();
@@ -551,6 +553,41 @@ namespace Lively.Player.CefSharp
                         }
                     };
                     hardwareUsageService.Start();
+                }
+
+                // 本地壁纸：每秒推送系统占用（window.contactableStats），供硬件监控类壁纸绘制曲线。
+                if (!startArgs.SysInfo && startArgs.Type == WebPageType.local)
+                {
+                    hostStatsService = new HardwareUsageService();
+                    hostStatsService.HWMonitor += (s, data) =>
+                    {
+                        try
+                        {
+                            if (isPaused)
+                                return;
+
+                            var stats = new
+                            {
+                                cpu = Math.Round(data.CurrentCpu, 1),
+                                gpu = Math.Round(data.CurrentGpu3D, 1),
+                                ramUsedMb = Math.Max(0, Math.Round(data.TotalRam - data.CurrentRamAvail, 0)),
+                                ramTotalMb = data.TotalRam,
+                                netDownBps = Math.Round(data.CurrentNetDown, 0),
+                                netUpBps = Math.Round(data.CurrentNetUp, 0),
+                                cpuName = data.NameCpu,
+                                gpuName = data.NameGpu,
+                                ts = DateTimeOffset.Now.ToUnixTimeMilliseconds()
+                            };
+                            var json = JsonConvert.SerializeObject(stats, Formatting.None);
+                            if (chromeBrowser.CanExecuteJavascriptInMainFrame)
+                                chromeBrowser.ExecuteScriptAsync("window.contactableStats=" + json + ";");
+                        }
+                        catch
+                        {
+                            //TODO
+                        }
+                    };
+                    hostStatsService.Start();
                 }
             }
         }

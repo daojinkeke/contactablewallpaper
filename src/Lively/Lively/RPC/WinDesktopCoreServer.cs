@@ -75,7 +75,13 @@ namespace Lively.RPC
             try
             {
                 var lm = wallpaperLibraryFactory.CreateFromDirectory(request.LivelyInfoPath);
-                var display = displayManager.DisplayMonitors.FirstOrDefault(x => x.DeviceId == request.MonitorId);
+                var display = displayManager.GetDisplayMonitor(request.MonitorId);
+                if (display is null && !string.IsNullOrWhiteSpace(request.MonitorId))
+                {
+                    // 选屏失败时静默退回主屏，表现就是“选副屏却应用在主屏”，必须留下可诊断记录。
+                    Logger.Warn($"Monitor id '{request.MonitorId}' not found, falling back to primary display. " +
+                        $"Available: {string.Join(", ", displayManager.DisplayMonitors.Select(x => $"{x.DeviceName}={x.DeviceId}"))}");
+                }
                 await desktopCore.SetWallpaperAsync(lm, display ?? displayManager.PrimaryDisplayMonitor);
             }
             catch (Exception e)
@@ -274,7 +280,7 @@ namespace Lively.RPC
 
         public override Task<Empty> CloseWallpaperMonitor(CloseWallpaperMonitorRequest request, ServerCallContext context)
         {
-            var display = displayManager.DisplayMonitors.FirstOrDefault(x => x.DeviceId == request.MonitorId);
+            var display = displayManager.GetDisplayMonitor(request.MonitorId);
             if (display != null)
             {
                 desktopCore.CloseWallpaper(display);
@@ -391,7 +397,7 @@ namespace Lively.RPC
             }
             else
             {
-                var display = displayManager.DisplayMonitors.FirstOrDefault(x => x.DeviceId == request.MonitorId);
+                var display = displayManager.GetDisplayMonitor(request.MonitorId);
                 desktopCore.SendMessageWallpaper(display, request.LivelyInfoPath, obj);
             }
             return Task.FromResult(new Empty());
@@ -405,7 +411,9 @@ namespace Lively.RPC
                 {
                     case WallpaperArrangement.per:
                         {
-                            var wallpaper = desktopCore.Wallpapers.FirstOrDefault(x => request.MonitorId == x.Screen.DeviceId);
+                            var monitor = displayManager.GetDisplayMonitor(request.MonitorId);
+                            var wallpaper = monitor is null ? null :
+                                desktopCore.Wallpapers.FirstOrDefault(x => x.Screen.Equals(monitor));
                             if (wallpaper is not null)
                             {
                                 await wallpaper.ScreenCapture(request.SavePath);

@@ -36,5 +36,14 @@ namespace Lively.Models.Ai
         public int CompletionTokens { get; set; }
         public int TotalTokens { get; set; }
         public string CreatedAt { get; set; }
+
+        /// <summary>本次修改附带的参考图片文件名（位于会话目录内）；为空表示没有附图。</summary>
+        public string AttachmentFile { get; set; }
+
+        /// <summary>参考图片的原始文件名，用于对话气泡展示。</summary>
+        public string AttachmentName { get; set; }
+
+        /// <summary>视觉模型对该图片的结构化转述，保留用于追溯。</summary>
+        public string AttachmentDescription { get; set; }
     }
 }

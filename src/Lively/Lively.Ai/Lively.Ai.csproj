@@ -1,7 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net9.0-windows10.0.18362.0</TargetFramework>
+    <!-- 纯托管逻辑（HTTP/HTML 处理/ONNX 推理），不触碰 WinRT。
+         用 net9.0 而非 net9.0-windows，可避免把 23 MB 的 Microsoft.Windows.SDK.NET 投影打进 AI CLI。 -->
+    <TargetFramework>net9.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>Lively.Ai</RootNamespace>

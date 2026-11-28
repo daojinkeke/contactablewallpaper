@@ -65,6 +65,72 @@ namespace Lively.UI.WinUI.Services.Contactable
         public string TempRoot => Path.Combine(WallpaperRoot, Constants.CommonPartialPaths.WallpaperInstallTempDir);
         public string ProjectsRoot => Constants.CommonPaths.ProjectsDir;
 
+        /// <summary>随包默认壁纸的目录名，用于把播种进来的内置壁纸和用户自己的壁纸区分开。</summary>
+        private static readonly string[] BuiltinFolderNames = LoadBuiltinFolderNames();
+
+        private static string[] LoadBuiltinFolderNames()
+        {
+            try
+            {
+                // UI 位于 <安装目录>\plugins\UI，Core 侧的 Assets 在 <安装目录>\Assets，
+                // 开发态也可能直接把 Assets 放在输出目录旁，这里逐级探测。
+                var baseDir = AppContext.BaseDirectory;
+                var candidates = new[]
+                {
+                    Path.Combine(baseDir, "Assets", "DefaultWallpapers"),
+                    Path.Combine(baseDir, "..", "Assets", "DefaultWallpapers"),
+                    Path.Combine(baseDir, "..", "..", "Assets", "DefaultWallpapers"),
+                };
+
+                foreach (var dir in candidates)
+                {
+                    if (!Directory.Exists(dir))
+                        continue;
+
+                    var names = Directory.GetDirectories(dir)
+                        .Select(Path.GetFileName)
+                        .Where(x => !string.IsNullOrWhiteSpace(x))
+                        .ToArray();
+                    if (names.Length > 0)
+                        return names;
+                }
+            }
+            catch (Exception)
+            {
+                // 读不到时退回按元数据判定内置壁纸。
+            }
+
+            return Array.Empty<string>();
+        }
+
+        /// <summary>
+        /// 判定壁纸来源：内置默认壁纸、AI 生成（网页/视差）、其余视为用户自己添加。
+        /// 旧版本入库的目录以 contactable- 开头，同样归为 AI 生成。
+        /// </summary>
+        public static WallpaperSourceKind ResolveSource(string folderPath, LivelyInfoModel info)
+        {
+            var folderName = Path.GetFileName(folderPath) ?? string.Empty;
+            if (folderName.Length == 0)
+                return WallpaperSourceKind.Imported;
+
+            if (BuiltinFolderNames.Any(x => string.Equals(x, folderName, StringComparison.OrdinalIgnoreCase)))
+                return WallpaperSourceKind.Builtin;
+
+            if (folderName.StartsWith("ai-", StringComparison.OrdinalIgnoreCase) ||
+                folderName.StartsWith("contactable-", StringComparison.OrdinalIgnoreCase) ||
+                !string.IsNullOrWhiteSpace(info?.Prompt) ||
+                string.Equals(info?.Author, "contactable", StringComparison.OrdinalIgnoreCase) ||
+                (info?.Tags?.Any(x => string.Equals(x, "depth", StringComparison.OrdinalIgnoreCase)) ?? false))
+                return WallpaperSourceKind.Ai;
+
+            if (string.Equals(info?.Author, Constants.ApplicationType.DisplayName, StringComparison.OrdinalIgnoreCase) &&
+                string.IsNullOrWhiteSpace(info.Prompt) &&
+                string.IsNullOrWhiteSpace(info.GeneratedAt))
+                return WallpaperSourceKind.Builtin;
+
+            return WallpaperSourceKind.Imported;
+        }
+
         public IReadOnlyList<LibraryItemVm> ScanLibrary()
         {
             var items = new List<LibraryItemVm>();
@@ -113,7 +179,8 @@ namespace Lively.UI.WinUI.Services.Contactable
                             TypeText = DescribeType(type),
                             FolderPath = folder,
                             ThumbnailPath = model.ImagePath,
-                            IsInUse = running.Contains(folder)
+                            IsInUse = running.Contains(folder),
+                            SourceKind = ResolveSource(folder, model.LivelyInfo)
                         });
                     }
                     catch (Exception ex)
@@ -258,7 +325,7 @@ namespace Lively.UI.WinUI.Services.Contactable
                 using var white = new SolidBrush(Color.FromArgb(238, 255, 255, 255));
                 using var dim = new SolidBrush(Color.FromArgb(190, 214, 228, 255));
                 graphics.DrawString(Shorten(title, 26), titleFont, white, 24, 268);
-                graphics.DrawString($"Contactable · {style.Name}", smallFont, dim, 26, 306);
+                graphics.DrawString(style.IsAuto ? "Contactable Wallpaper" : $"Contactable · {style.Name}", smallFont, dim, 26, 306);
 
                 bitmap.Save(path, ImageFormat.Png);
                 return path;
@@ -349,7 +416,8 @@ namespace Lively.UI.WinUI.Services.Contactable
             if (item == null || !File.Exists(item.HtmlPath))
                 throw new InvalidOperationException("生成结果文件不存在。");
 
-            var dest = Path.Combine(InstallRoot, $"contactable-{DateTime.Now:yyyyMMdd-HHmmss}-{RandomHex(4)}");
+            // AI 生成的网页壁纸统一用 ai- 前缀，方便在资源管理器里一眼认出来源。
+            var dest = Path.Combine(InstallRoot, $"ai-{DateTime.Now:yyyyMMdd-HHmmss}-{RandomHex(4)}");
             Directory.CreateDirectory(dest);
 
             var metadata = libraryFactory.CreateWallpaperPackage(item.HtmlPath, dest, WallpaperType.web);
@@ -401,7 +469,8 @@ namespace Lively.UI.WinUI.Services.Contactable
                 if (!File.Exists(Path.Combine(sourceDirectory, "LivelyInfo.json")))
                     throw new InvalidOperationException("该目录不是完整的壁纸包（缺少 LivelyInfo.json）。");
 
-                var dest = Path.Combine(InstallRoot, $"contactable-{DateTime.Now:yyyyMMdd-HHmmss}-{RandomHex(4)}");
+                // 整目录导入（如视差壁纸）用 ai-depth- 前缀，和网页壁纸、用户自带素材区分。
+                var dest = Path.Combine(InstallRoot, $"ai-depth-{DateTime.Now:yyyyMMdd-HHmmss}-{RandomHex(4)}");
                 CopyDirectory(sourceDirectory, dest);
                 return dest;
             });

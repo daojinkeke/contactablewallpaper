@@ -173,7 +173,58 @@ namespace Lively.Core.Display
             if (string.IsNullOrWhiteSpace(displayMonitor.DeviceId))
                 displayMonitor.DeviceId = GetDefaultDisplayDeviceId(displayMonitor.Bounds);
 
+            // 身份唯一性兜底：部分显卡/镜像拓扑下 EnumDisplayDevices 会给多台显示器返回同一个
+            // 接口名，边界哈希在相同边界下也可能撞值。一旦重复，所有按 DeviceId 精确匹配的
+            // 逻辑（选屏应用、关闭壁纸、窗口重排）都只会命中第一台显示器。
+            EnsureUniqueDeviceId(displayMonitor);
+
             return displayMonitor;
+        }
+
+        /// <summary>
+        /// 保证当前会话内每台显示器拥有唯一 DeviceId。
+        /// </summary>
+        private void EnsureUniqueDeviceId(DisplayMonitor displayMonitor)
+        {
+            if (string.IsNullOrWhiteSpace(displayMonitor.DeviceId))
+                return;
+
+            var conflict = DisplayMonitors.FirstOrDefault(x => !ReferenceEquals(x, displayMonitor)
+                && string.Equals(x.DeviceId, displayMonitor.DeviceId, StringComparison.OrdinalIgnoreCase));
+            if (conflict == null)
+                return;
+
+            var suffix = NormalizeDeviceName(displayMonitor.DeviceName);
+            if (string.IsNullOrEmpty(suffix))
+                suffix = $"{displayMonitor.Bounds.X}-{displayMonitor.Bounds.Y}-{displayMonitor.Bounds.Width}-{displayMonitor.Bounds.Height}";
+
+            displayMonitor.DeviceId = $"{displayMonitor.DeviceId}#{suffix}";
+        }
+
+        private static string NormalizeDeviceName(string deviceName)
+        {
+            if (string.IsNullOrWhiteSpace(deviceName))
+                return string.Empty;
+
+            return deviceName
+                .Replace("\\\\?\\", string.Empty)
+                .Replace("\\\\.\\", string.Empty)
+                .Replace('\\', '_')
+                .TrimEnd('_');
+        }
+
+        /// <summary>
+        /// 按外部传入的显示器标识解析当前会话中的显示器。
+        /// 兼容旧版本/旧配置写入的 DeviceName（如 "\\.\DISPLAY2"），
+        /// 解析不到时返回 null 由调用方决定兜底策略。
+        /// </summary>
+        public DisplayMonitor GetDisplayMonitor(string deviceId)
+        {
+            if (string.IsNullOrWhiteSpace(deviceId))
+                return null;
+
+            return DisplayMonitors.FirstOrDefault(x => string.Equals(x.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase))
+                ?? DisplayMonitors.FirstOrDefault(x => string.Equals(x.DeviceName, deviceId, StringComparison.OrdinalIgnoreCase));
         }
 
         private DisplayMonitor GetDisplayMonitorByDeviceName(string deviceName)

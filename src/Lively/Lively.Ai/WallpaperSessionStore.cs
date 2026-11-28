@@ -92,6 +92,39 @@ namespace Lively.Ai
             return Path.Combine(RootDir, sessionId, "v" + version + ".html");
         }
 
+        /// <summary>
+        /// 把用户选择的参考图片复制进会话目录，返回会话内的文件名。
+        /// 复制后不依赖原始路径，用户清理临时文件也不会丢图。
+        /// </summary>
+        public string ImportAttachment(string sessionId, string sourcePath)
+        {
+            if (!IsValidSessionId(sessionId) || string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+                return null;
+
+            var extension = Path.GetExtension(sourcePath);
+            if (string.IsNullOrWhiteSpace(extension) || extension.Length > 10)
+                extension = ".img";
+
+            var directory = Path.Combine(RootDir, sessionId);
+            Directory.CreateDirectory(directory);
+            var fileName = "attachment-" + Guid.NewGuid().ToString("N").Substring(0, 8) + extension.ToLowerInvariant();
+            File.Copy(sourcePath, Path.Combine(directory, fileName), true);
+            return fileName;
+        }
+
+        /// <summary>把会话内的附件文件名解析为绝对路径；非法文件名返回 null。</summary>
+        public string GetAttachmentPath(string sessionId, string fileName)
+        {
+            if (!IsValidSessionId(sessionId) || string.IsNullOrWhiteSpace(fileName))
+                return null;
+            if (fileName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
+                fileName.Contains("..", StringComparison.Ordinal))
+                return null;
+
+            var path = Path.Combine(RootDir, sessionId, fileName);
+            return File.Exists(path) ? path : null;
+        }
+
         public string ReadVersionHtml(string sessionId, int version)
         {
             var path = GetVersionPath(sessionId, version);
@@ -109,7 +142,10 @@ namespace Lively.Ai
             long elapsedMs,
             int promptTokens,
             int completionTokens,
-            int totalTokens)
+            int totalTokens,
+            string attachmentFile = null,
+            string attachmentName = null,
+            string attachmentDescription = null)
         {
             var version = (session.Versions.Count == 0 ? 0 : session.Versions[^1].Version) + 1;
             var fileName = "v" + version + ".html";
@@ -129,7 +165,10 @@ namespace Lively.Ai
                 PromptTokens = promptTokens,
                 CompletionTokens = completionTokens,
                 TotalTokens = totalTokens,
-                CreatedAt = DateTimeOffset.UtcNow.ToString("o")
+                CreatedAt = DateTimeOffset.UtcNow.ToString("o"),
+                AttachmentFile = attachmentFile ?? string.Empty,
+                AttachmentName = attachmentName ?? string.Empty,
+                AttachmentDescription = attachmentDescription ?? string.Empty
             };
 
             session.Versions.Add(entry);

@@ -1,4 +1,5 @@
 using Lively.Common.Helpers;
+using Lively.Common.Helpers.Pinvoke;
 using Lively.Common.Services;
 using Lively.Core.Display;
 using Lively.Models;
@@ -58,13 +59,39 @@ namespace Lively.Core.Interaction
                 return false;
 
             // Contract 06 §5.1: per/duplicate use the hit display, span uses the virtual screen origin.
-            localPoint = arrangement == WallpaperArrangement.span
-                ? InputUtil.ToMouseSpanLocal(screenPoint.X, screenPoint.Y, displayManager.VirtualScreenBounds)
-                : InputUtil.ToMouseDisplayLocal(screenPoint.X, screenPoint.Y, monitor.Bounds);
+            // 以目标窗口的真实屏幕原点优先：显示器变更、跨屏重排或窗口被重新定位后，
+            // 按显示器/虚拟屏 bounds 推算会与窗口实际位置不一致，指针会整体偏移。
+            // 取窗口原点时，Player 侧只需再扣客户区偏移，链路两端始终对齐同一原点。
+            var origin = GetLocalOrigin(target, monitor, arrangement);
+            localPoint = new Point(screenPoint.X - origin.X, screenPoint.Y - origin.Y);
 
             wallpaper = target;
             display = monitor;
             return true;
+        }
+
+        /// <summary>
+        /// 局部坐标原点：优先取壁纸窗口真实屏幕位置，取不到时退回显示器/虚拟屏原点。
+        /// </summary>
+        private Point GetLocalOrigin(IWallpaper target, DisplayMonitor monitor, WallpaperArrangement arrangement)
+        {
+            try
+            {
+                if (!IntPtr.Equals(target.Handle, IntPtr.Zero) &&
+                    NativeMethods.GetWindowRect(target.Handle, out var rect) != 0 &&
+                    rect.Right > rect.Left && rect.Bottom > rect.Top)
+                {
+                    return new Point(rect.Left, rect.Top);
+                }
+            }
+            catch (Exception)
+            {
+                // 句柄已失效：退回按显示器推算，保持原有行为。
+            }
+
+            return arrangement == WallpaperArrangement.span
+                ? displayManager.VirtualScreenBounds.Location
+                : monitor.Bounds.Location;
         }
     }
 }

@@ -19,11 +19,26 @@
       cursor: crosshair;
       user-select: none;
       -webkit-user-select: none;
+      animation: appear 1.6s ease .1s both;
+    }
+
+    @keyframes appear {
+      from {
+        opacity: 0;
+      }
+
+      to {
+        opacity: 1;
+      }
     }
 
     #scene {
       position: fixed;
       inset: 0;
+      /* canvas 是替换元素，仅靠 inset 无法撑满视口：width/height:auto 会退回
+         画布属性的固有尺寸（W×DPR），在非 1 倍缩放下画面被放大裁切、点击偏移。 */
+      width: 100%;
+      height: 100%;
       display: block;
     }
 
@@ -34,12 +49,23 @@
       background:
         radial-gradient(110% 92% at 50% 46%, rgba(0, 0, 0, 0) 42%, rgba(0, 0, 0, .3) 76%, rgba(0, 0, 0, .66) 100%);
     }
+
+    .grain {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .05;
+      mix-blend-mode: overlay;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+      background-size: 160px 160px;
+    }
   </style>
 </head>
 
 <body>
   <canvas id="scene"></canvas>
   <div class="vignette"></div>
+  <div class="grain"></div>
 
   <script>
     (function () {
@@ -50,101 +76,251 @@
       var ctx = canvas.getContext('2d', { alpha: false });
       var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-      var W = 0, H = 0, dpr = 1, sky = null, sun = null;
+      var W = 0, H = 0, dpr = 1;
+      var sky = null, sun = null, haze = null, sandPattern = null;
       var pointer = { x: 0.5, y: 0.5, sx: 0.5, sy: 0.5, active: false };
-      var streaks = [], bursts = [];
-      var lastInput = performance.now(), eco = 0, lastDraw = 0, time = 0;
-      var windDir = 1, gust = 0;
 
-      var layers = [
-        { base: 0.60, amp: 0.032, freq: 1.5, speed: 0.05, color: '#3a2440', alpha: 0.95 },
-        { base: 0.70, amp: 0.040, freq: 1.1, speed: 0.08, color: '#2a1930', alpha: 0.96 },
-        { base: 0.82, amp: 0.048, freq: 0.85, speed: 0.12, color: '#1b1020', alpha: 0.97 },
-        { base: 0.94, amp: 0.036, freq: 1.7, speed: 0.16, color: '#100a14', alpha: 1 },
+      var stars = [], streaks = [], bursts = [], sparkles = [];
+      var dunes = [];
+
+      var lastInput = performance.now(), eco = 0, lastDraw = 0, time = 0;
+      var windDir = 1, gust = 0, windSpeed = 1;
+
+      var specs = [
+        { base: 0.545, amp: 0.030, freq: 1.35, speed: 0.045, color: '#4a2f4c', alpha: 0.9, depth: 6 },
+        { base: 0.635, amp: 0.038, freq: 1.05, speed: 0.070, color: '#35203a', alpha: 0.94, depth: 11 },
+        { base: 0.735, amp: 0.044, freq: 0.82, speed: 0.100, color: '#241529', alpha: 0.96, depth: 18 },
+        { base: 0.845, amp: 0.046, freq: 1.55, speed: 0.135, color: '#150d1a', alpha: 0.98, depth: 27 },
+        { base: 0.955, amp: 0.034, freq: 2.05, speed: 0.170, color: '#0a060d', alpha: 1, depth: 38 }
       ];
 
-      function markInput() {
-        lastInput = performance.now();
-        eco = 0;
+      function clamp(v, a, b) {
+        return v < a ? a : (v > b ? b : v);
       }
 
       function rand(a, b) {
         return a + Math.random() * (b - a);
       }
 
+      function hexToRgb(h) {
+        return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+      }
+
+      function mixHex(a, b, t) {
+        var A = hexToRgb(a), B = hexToRgb(b);
+        var c = [
+          A[0] + (B[0] - A[0]) * t,
+          A[1] + (B[1] - A[1]) * t,
+          A[2] + (B[2] - A[2]) * t
+        ];
+        var s = c.map(function (v) {
+          var x = Math.round(clamp(v, 0, 255)).toString(16);
+          return x.length < 2 ? '0' + x : x;
+        }).join('');
+        return '#' + s;
+      }
+
+      function hexA(h, a) {
+        var c = hexToRgb(h);
+        return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+      }
+
+      /* ---------- 本地时间：太阳位置与整体明暗随之变化 ---------- */
+      var clockOffset = 0, clockReady = false;
+      var hour = 12, light = 1, twilight = 0;
+
+      function readClock() {
+        if (!clockReady) {
+          clockReady = true;
+          var raw = window.contactableEnv;
+          if (raw && raw.time && raw.time.iso) {
+            var d = new Date(raw.time.iso);
+            if (!isNaN(d.getTime())) clockOffset = d.getTime() - Date.now();
+          }
+        }
+        var n = new Date(Date.now() + clockOffset);
+        hour = n.getHours() + n.getMinutes() / 60;
+      }
+
+      function sunCurve(h) {
+        var rise = 5.8, set = 19.0;
+        if (h < rise - 0.8 || h > set + 0.8) return 0;
+        var p = clamp((h - rise) / (set - rise), 0, 1);
+        return Math.pow(Math.sin(p * Math.PI), 0.85);
+      }
+
+      function computePalette() {
+        var s = sunCurve(hour);
+        light = clamp(s * 1.04, 0.03, 1);
+        twilight = Math.exp(-Math.pow((hour - 6.2) / 1.15, 2))
+          + Math.exp(-Math.pow((hour - 18.3) / 1.15, 2));
+        twilight = clamp(twilight, 0, 1);
+      }
+
+      function celestPos() {
+        var isSun = light > 0.10;
+        if (isSun) {
+          var p = clamp((hour - 5.8) / 13.2, 0, 1);
+          return {
+            x: 0.12 + p * 0.76,
+            y: 0.42 - Math.sin(p * Math.PI) * 0.30,
+            isSun: true
+          };
+        }
+        // 夜间：月亮走自己的轨迹，午夜高悬
+        var pm = ((hour - 18) % 24 + 24) % 24 / 12;
+        pm = clamp(pm, 0, 1);
+        return {
+          x: 0.14 + pm * 0.72,
+          y: 0.55 - Math.sin(pm * Math.PI) * 0.40,
+          isSun: false
+        };
+      }
+
+      function markInput() {
+        lastInput = performance.now();
+        eco = 0;
+      }
+
+      function buildSandPattern() {
+        var c = document.createElement('canvas');
+        c.width = 96;
+        c.height = 96;
+        var g = c.getContext('2d');
+        for (var i = 0; i < 1800; i++) {
+          var light = Math.random() > 0.45;
+          g.fillStyle = light
+            ? 'rgba(255, 226, 190, ' + rand(0.03, 0.1) + ')'
+            : 'rgba(30, 14, 24, ' + rand(0.04, 0.12) + ')';
+          g.fillRect(Math.random() * 96, Math.random() * 96, 1, 1);
+        }
+        sandPattern = ctx.createPattern(c, 'repeat');
+      }
+
+      function makeStars() {
+        var count = Math.round(clamp(W * H / 22000, 40, 120));
+        stars = [];
+        for (var i = 0; i < count; i++) {
+          stars.push({
+            x: Math.random(),
+            y: Math.random() * 0.42,
+            r: 0.4 + Math.random() * 1.3,
+            a: 0.15 + Math.random() * 0.55,
+            phase: Math.random() * TAU,
+            speed: rand(0.3, 1.4)
+          });
+        }
+      }
+
+      function makeStreaks() {
+        streaks = [];
+        var layers = [
+          { count: Math.round(clamp(W / 34, 26, 70)), yMin: 0.42, yMax: 0.86, len: [0.03, 0.09], alpha: [0.05, 0.16], speed: [0.03, 0.07], w: 0.8 },
+          { count: Math.round(clamp(W / 24, 30, 90)), yMin: 0.55, yMax: 0.94, len: [0.05, 0.14], alpha: [0.08, 0.24], speed: [0.06, 0.12], w: 1.1 },
+          { count: Math.round(clamp(W / 18, 24, 70)), yMin: 0.68, yMax: 1.0, len: [0.08, 0.22], alpha: [0.12, 0.4], speed: [0.1, 0.2], w: 1.5 }
+        ];
+        for (var l = 0; l < layers.length; l++) {
+          var cfg = layers[l];
+          for (var i = 0; i < cfg.count; i++) {
+            streaks.push({
+              x: Math.random(),
+              y: rand(cfg.yMin, cfg.yMax),
+              len: rand(cfg.len[0], cfg.len[1]),
+              alpha: rand(cfg.alpha[0], cfg.alpha[1]),
+              speed: rand(cfg.speed[0], cfg.speed[1]),
+              w: cfg.w,
+              phase: rand(0, TAU),
+              layer: l
+            });
+          }
+        }
+      }
+
+      function makeDunes() {
+        dunes = [];
+        for (var i = 0; i < specs.length; i++) {
+          var s = specs[i];
+          dunes.push({
+            base: s.base,
+            amp: s.amp,
+            freq: s.freq,
+            speed: s.speed,
+            color: s.color,
+            alpha: s.alpha,
+            depth: s.depth,
+            seed: rand(0, TAU)
+          });
+        }
+      }
+
+      function makeSparkles() {
+        sparkles = [];
+        var count = Math.round(clamp(W / 26, 30, 90));
+        for (var i = 0; i < count; i++) {
+          sparkles.push({
+            x: Math.random(),
+            y: rand(0.55, 0.98),
+            size: rand(0.6, 1.8),
+            phase: rand(0, TAU),
+            speed: rand(0.6, 2)
+          });
+        }
+      }
+
       function resize() {
-        W = window.innerWidth;
-        H = window.innerHeight;
+        var rect = canvas.getBoundingClientRect();
+        W = rect.width || window.innerWidth;
+        H = rect.height || window.innerHeight;
         dpr = Math.min(2, window.devicePixelRatio || 1);
         canvas.width = Math.round(W * dpr);
         canvas.height = Math.round(H * dpr);
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-        sky = ctx.createLinearGradient(0, 0, 0, H * 0.8);
-        sky.addColorStop(0, '#171226');
-        sky.addColorStop(0.42, '#3d2a45');
-        sky.addColorStop(0.68, '#8d4f50');
-        sky.addColorStop(0.82, '#c97a52');
-        sky.addColorStop(1, '#1a1018');
-
-        sun = ctx.createRadialGradient(W * 0.68, H * 0.6, 0, W * 0.68, H * 0.6, H * 0.34);
-        sun.addColorStop(0, 'rgba(255, 214, 150, 0.85)');
-        sun.addColorStop(0.3, 'rgba(244, 152, 92, 0.28)');
-        sun.addColorStop(1, 'rgba(200, 90, 60, 0)');
-
+        buildSandPattern();
+        makeStars();
         makeStreaks();
+        makeDunes();
+        makeSparkles();
       }
 
-      function makeStreaks() {
-        var count = Math.round(Math.min(160, Math.max(50, W / 14)));
-        streaks = [];
-        for (var i = 0; i < count; i++) {
-          streaks.push({
-            x: Math.random(),
-            y: rand(0.5, 1.0),
-            len: rand(0.02, 0.12),
-            speed: rand(0.02, 0.09),
-            alpha: rand(0.06, 0.3),
-            phase: rand(0, TAU)
-          });
-        }
-      }
-
-      function addBurst(nx, ny) {
-        for (var i = 0; i < 22; i++) {
-          var a = rand(-Math.PI * 0.85, -Math.PI * 0.15);
-          var v = rand(0.03, 0.16);
+      function addBurst(nx, ny, power) {
+        for (var i = 0; i < 26 * power; i++) {
+          var a = rand(-Math.PI * 0.92, -Math.PI * 0.08);
+          var v = rand(0.03, 0.17) * power;
           bursts.push({
             x: nx,
             y: ny,
             vx: Math.cos(a) * v,
             vy: Math.sin(a) * v * 0.55,
             life: 1,
-            decay: rand(0.7, 1.5),
-            size: rand(1, 3.4)
+            decay: rand(0.6, 1.5),
+            size: rand(0.8, 3.2)
           });
         }
+        gust = 1;
       }
 
-      function duneY(layer, x) {
-        var t = time * layer.speed;
-        return H * layer.base +
-          Math.sin(x * 0.0016 * layer.freq * 6 + t + layer.base * 20) * H * layer.amp +
-          Math.sin(x * 0.0007 * layer.freq * 6 - t * 0.7) * H * layer.amp * 0.6;
+      function duneY(d, x, t) {
+        var shift = d.base * 17.0;
+        return H * d.base
+          + Math.sin(x * 0.0016 * d.freq * 6 + t * d.speed * windSpeed * windDir + d.seed) * H * d.amp
+          + Math.sin(x * 0.0007 * d.freq * 6 - t * d.speed * 0.7 * windSpeed + d.seed * 1.7) * H * d.amp * 0.55
+          + Math.sin(x * 0.0041 * d.freq + shift) * H * d.amp * 0.12;
       }
 
       function update(dt) {
-        pointer.sx += (pointer.x - pointer.sx) * Math.min(1, dt * 3);
-        pointer.sy += (pointer.y - pointer.sy) * Math.min(1, dt * 3);
-        gust = Math.max(0, gust - dt * 0.6);
+        pointer.sx += (pointer.x - pointer.sx) * Math.min(1, dt * 3.1);
+        pointer.sy += (pointer.y - pointer.sy) * Math.min(1, dt * 3.1);
+        gust = Math.max(0, gust - dt * 0.62);
+        if (reduceMotion) return;
 
-        var speedScale = 1 + gust * 1.8;
+        var speedScale = 1 + gust * 1.9 + (pointer.active ? (pointer.sx - 0.5) * 1.2 : 0);
         for (var i = 0; i < streaks.length; i++) {
           var s = streaks[i];
-          s.x += s.speed * dt * windDir * speedScale * (0.7 + (pointer.sx - 0.5) * 0.8);
-          s.y += Math.sin(time * 1.4 + s.phase) * 0.004 * dt;
-          if (s.x > 1.08) s.x = -0.08;
-          if (s.x < -0.08) s.x = 1.08;
+          s.x += s.speed * dt * windDir * windSpeed * speedScale * (0.55 + s.layer * 0.3);
+          s.y += Math.sin(time * 1.4 + s.phase) * 0.003 * dt * (1 + s.layer * 0.4);
+          if (s.x > 1.1) s.x = -0.1;
+          if (s.x < -0.1) s.x = 1.1;
         }
 
         for (var j = bursts.length - 1; j >= 0; j--) {
@@ -156,84 +332,255 @@
           }
           b.x += b.vx * dt * windDir;
           b.y += b.vy * dt;
-          b.vy += 0.05 * dt;
+          b.vy += 0.055 * dt;
+          b.vx *= 0.995;
+        }
+      }
+
+      var DAY_DUNE = ['#dcb98a', '#c9a173', '#b28a5e', '#8f6844', '#6b4a2f'];
+      var NIGHT_DUNE = ['#4a2f4c', '#35203a', '#241529', '#150d1a', '#0a060d'];
+
+      function drawStars(t) {
+        var vis = clamp(1 - light * 2.1, 0, 1);
+        if (vis < 0.02) return;
+        for (var i = 0; i < stars.length; i++) {
+          var s = stars[i];
+          var tw = 0.45 + 0.55 * Math.sin(t * s.speed + s.phase);
+          var fade = 1 - Math.min(1, s.y / 0.46);
+          ctx.globalAlpha = s.a * tw * fade * vis;
+          ctx.fillStyle = '#ffe9dc';
+          ctx.beginPath();
+          ctx.arc(s.x * W, s.y * H, s.r, 0, TAU);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawDunes(t) {
+        for (var i = 0; i < dunes.length; i++) {
+          var d = dunes[i];
+          var shift = (pointer.sx - 0.5) * d.depth;
+
+          var col = mixHex(NIGHT_DUNE[i], DAY_DUNE[i], light);
+          col = mixHex(col, '#e6a173', twilight * 0.18);
+
+          ctx.beginPath();
+          ctx.moveTo(-40, H + 40);
+          for (var x = -40; x <= W + 40; x += 11) {
+            ctx.lineTo(x + shift, duneY(d, x + shift, t));
+          }
+          ctx.lineTo(W + 40, H + 40);
+          ctx.closePath();
+          ctx.globalAlpha = d.alpha;
+          ctx.fillStyle = col;
+          ctx.fill();
+
+          // 沙粒噪点纹理
+          if (sandPattern) {
+            ctx.globalAlpha = 0.22 + light * 0.30;
+            ctx.fillStyle = sandPattern;
+            ctx.fill();
+          }
+
+          // 沙脊受光边
+          ctx.globalAlpha = 1;
+          ctx.globalCompositeOperation = 'lighter';
+          var rimAlpha = (0.18 - i * 0.026) * (0.30 + light * 0.95 + twilight * 0.35);
+          var rimCol = i < 3
+            ? 'rgba(255, 214, 168, ' + rimAlpha.toFixed(3) + ')'
+            : 'rgba(255, 186, 132, ' + rimAlpha.toFixed(3) + ')';
+          var g = ctx.createLinearGradient(0, H * d.base - H * d.amp * 1.2, 0, H * d.base + H * 0.12);
+          g.addColorStop(0, rimCol);
+          g.addColorStop(1, 'rgba(255, 150, 100, 0)');
+          ctx.strokeStyle = g;
+          ctx.lineWidth = 1.4 + i * 0.3;
+          ctx.beginPath();
+          for (var x2 = -40; x2 <= W + 40; x2 += 11) {
+            var yy = duneY(d, x2 + shift, t);
+            if (x2 === -40) ctx.moveTo(x2 + shift, yy);
+            else ctx.lineTo(x2 + shift, yy);
+          }
+          ctx.stroke();
+          ctx.globalCompositeOperation = 'source-over';
         }
       }
 
       function draw() {
+        readClock();
+        computePalette();
+
         ctx.globalCompositeOperation = 'source-over';
-        ctx.fillStyle = sky;
+
+        // 天色随时刻变化：深夜靛紫 → 正午沙金 → 黄昏橘红
+        var skyTop = mixHex('#08060f', '#4a7ba3', light);
+        var skyMid = mixHex('#181026', '#93b8cf', light);
+        var skyLow = mixHex('#38203a', '#dcc9a6', light);
+        var skyHor = mixHex('#6e3630', '#f0c894', light);
+        skyTop = mixHex(skyTop, '#5a2a46', twilight * 0.32);
+        skyMid = mixHex(skyMid, '#b9635a', twilight * 0.30);
+        skyLow = mixHex(skyLow, '#e08a5a', twilight * 0.40);
+        var gsky = ctx.createLinearGradient(0, 0, 0, H * 0.86);
+        gsky.addColorStop(0, skyTop);
+        gsky.addColorStop(0.32, skyMid);
+        gsky.addColorStop(0.56, skyLow);
+        gsky.addColorStop(0.74, skyHor);
+        gsky.addColorStop(0.9, mixHex(skyLow, '#120c16', 0.65));
+        gsky.addColorStop(1, '#0d0810');
+        ctx.fillStyle = gsky;
         ctx.fillRect(0, 0, W, H);
 
+        drawStars(time);
+
+        var cp = celestPos();
+        var sx = cp.x * W;
+        var sy = cp.y * H;
+        var sunAlpha = cp.isSun ? (0.55 + light * 0.45) : 0.30;
+
+        // 天体光晕
         ctx.globalCompositeOperation = 'lighter';
-        ctx.fillStyle = sun;
+        var glowCol = cp.isSun
+          ? (twilight > 0.35 ? '255,170,110' : '255,222,170')
+          : '190,210,240';
+        var glowR = H * (cp.isSun ? 0.36 : 0.22);
+        var glow = ctx.createRadialGradient(sx, sy, 0, sx, sy, glowR);
+        glow.addColorStop(0, 'rgba(' + glowCol + ',' + (0.55 * sunAlpha).toFixed(3) + ')');
+        glow.addColorStop(0.2, 'rgba(' + glowCol + ',' + (0.26 * sunAlpha).toFixed(3) + ')');
+        glow.addColorStop(0.52, 'rgba(' + glowCol + ',' + (0.09 * sunAlpha).toFixed(3) + ')');
+        glow.addColorStop(1, 'rgba(' + glowCol + ',0)');
+        ctx.fillStyle = glow;
+        ctx.fillRect(0, 0, W, H);
+
+        // 日轮 / 月轮
+        var discR = H * (cp.isSun ? 0.040 : 0.022);
+        var disc = ctx.createRadialGradient(sx, sy, 0, sx, sy, discR * 2.4);
+        disc.addColorStop(0, cp.isSun ? 'rgba(255,248,230,0.98)' : 'rgba(232,240,252,0.95)');
+        disc.addColorStop(0.30, cp.isSun ? 'rgba(255,224,170,0.55)' : 'rgba(206,222,244,0.42)');
+        disc.addColorStop(1, cp.isSun ? 'rgba(255,196,130,0)' : 'rgba(170,196,232,0)');
+        ctx.fillStyle = disc;
+        ctx.beginPath();
+        ctx.arc(sx, sy, discR * 2.4, 0, TAU);
+        ctx.fill();
+
+        // 镜头光斑：白天更明显
+        if (cp.isSun && light > 0.35) {
+          for (var f = 1; f <= 3; f++) {
+            var fx = sx - f * W * 0.09;
+            var fy = sy + f * H * 0.055;
+            var fr = H * (0.012 + f * 0.009);
+            var fg = ctx.createRadialGradient(fx, fy, 0, fx, fy, fr);
+            fg.addColorStop(0, 'rgba(255, 214, 168, ' + (0.12 / f * light).toFixed(3) + ')');
+            fg.addColorStop(1, 'rgba(255, 180, 120, 0)');
+            ctx.fillStyle = fg;
+            ctx.beginPath();
+            ctx.arc(fx, fy, fr, 0, TAU);
+            ctx.fill();
+          }
+        }
+
+        // 地平线暖霾
+        var hazeA = 0.05 + light * 0.10 + twilight * 0.10;
+        var haze = ctx.createLinearGradient(0, H * 0.44, 0, H * 0.74);
+        haze.addColorStop(0, 'rgba(255, 186, 130, 0)');
+        haze.addColorStop(0.55, 'rgba(255, 184, 132, ' + hazeA.toFixed(3) + ')');
+        haze.addColorStop(1, 'rgba(255, 160, 110, 0)');
+        ctx.fillStyle = haze;
         ctx.fillRect(0, 0, W, H);
         ctx.globalCompositeOperation = 'source-over';
 
-        for (var l = 0; l < layers.length; l++) {
-          var layer = layers[l];
-          var shift = (pointer.sx - 0.5) * (l + 1) * 18;
-          ctx.fillStyle = layer.color;
-          ctx.globalAlpha = layer.alpha;
-          ctx.beginPath();
-          ctx.moveTo(-30, H + 30);
-          for (var x = -30; x <= W + 30; x += 12) {
-            ctx.lineTo(x + shift, duneY(layer, x + shift));
-          }
-          ctx.lineTo(W + 30, H + 30);
-          ctx.closePath();
-          ctx.fill();
-        }
-        ctx.globalAlpha = 1;
+        drawDunes(time);
 
+        // 风痕
         for (var i = 0; i < streaks.length; i++) {
           var s = streaks[i];
-          var sx = s.x * W;
-          var sy = s.y * H;
-          var len = s.len * W * 0.4;
-          var grad = ctx.createLinearGradient(sx, sy, sx + len * windDir, sy);
-          grad.addColorStop(0, 'rgba(255, 208, 160, 0)');
-          grad.addColorStop(0.55, 'rgba(255, 208, 160, ' + s.alpha + ')');
-          grad.addColorStop(1, 'rgba(255, 208, 160, 0)');
+          var xx = s.x * W;
+          var yy = s.y * H;
+          var len = s.len * W * 0.5 * (1 + gust * 0.7);
+          var grad = ctx.createLinearGradient(xx, yy, xx + len * windDir, yy);
+          grad.addColorStop(0, 'rgba(255, 214, 172, 0)');
+          grad.addColorStop(0.5, 'rgba(255, 214, 172, ' + (s.alpha * (0.35 + light * 0.95)).toFixed(3) + ')');
+          grad.addColorStop(1, 'rgba(255, 214, 172, 0)');
           ctx.strokeStyle = grad;
-          ctx.lineWidth = 1;
+          ctx.lineWidth = s.w;
           ctx.beginPath();
-          ctx.moveTo(sx, sy);
-          ctx.lineTo(sx + len * windDir, sy + Math.sin(time + s.phase) * 2);
+          ctx.moveTo(xx, yy);
+          ctx.lineTo(xx + len * windDir, yy + Math.sin(time + s.phase) * 2.4);
           ctx.stroke();
         }
 
+        // 沙面闪光：白天是日光反射，夜里只剩一点月光微闪
+        ctx.globalCompositeOperation = 'lighter';
+        var sparkK = light > 0.1 ? (0.25 + light * 0.75) : 0.08;
+        for (var k = 0; k < sparkles.length; k++) {
+          var sp = sparkles[k];
+          var tw = Math.max(0, Math.sin(time * sp.speed + sp.phase));
+          if (tw < 0.15) continue;
+          ctx.globalAlpha = tw * 0.5 * sparkK;
+          ctx.fillStyle = light > 0.4 ? '#ffe4c0' : '#dfe6ff';
+          ctx.fillRect(sp.x * W, sp.y * H, sp.size, sp.size);
+        }
+        ctx.globalAlpha = 1;
+
+        // 扬沙
         for (var j = 0; j < bursts.length; j++) {
           var b = bursts[j];
-          ctx.fillStyle = 'rgba(255, 206, 150, ' + (b.life * 0.75) + ')';
+          ctx.fillStyle = 'rgba(255, 212, 162, ' + (b.life * 0.8 * (0.35 + light * 0.65)).toFixed(3) + ')';
           ctx.beginPath();
           ctx.arc(b.x * W, b.y * H, b.size, 0, TAU);
           ctx.fill();
         }
+
+        // 指针处的沙尘旋涡
+        if (pointer.active) {
+          var px = pointer.sx * W;
+          var py = pointer.sy * H;
+          var haloCol = light > 0.4 ? '255, 206, 158' : '176, 190, 230';
+          var halo = ctx.createRadialGradient(px, py, 0, px, py, Math.max(W, H) * 0.14);
+          halo.addColorStop(0, 'rgba(' + haloCol + ', ' + (0.09 + gust * 0.06).toFixed(3) + ')');
+          halo.addColorStop(1, 'rgba(' + haloCol + ', 0)');
+          ctx.fillStyle = halo;
+          ctx.fillRect(0, 0, W, H);
+        }
+
+        ctx.globalCompositeOperation = 'source-over';
       }
 
       function frame(now) {
         var idle = now - lastInput;
-        var target = idle > 4000 ? 1 : 0;
-        eco += (target - eco) * 0.05;
-        var targetFps = 60 - eco * 40;
-        var step = 1000 / targetFps;
+        var target = idle > 4500 ? 1 : 0;
+        eco += (target - eco) * 0.045;
+        var step = 1000 / (60 - eco * 30);
         if (now - lastDraw < step - 1) {
           requestAnimationFrame(frame);
           return;
         }
         var dt = Math.min(0.1, (now - lastDraw) / 1000);
         lastDraw = now;
-        time += reduceMotion ? 0 : dt;
+        if (!reduceMotion) time += dt;
         update(dt);
         draw();
         requestAnimationFrame(frame);
       }
 
+      // 事件坐标统一换算为画布内的 0~1 比例，兼容 DPR、缩放与画布偏移。
+      function toLocal(e) {
+        var rect = canvas.getBoundingClientRect();
+        var sx = W / Math.max(1, rect.width);
+        var sy = H / Math.max(1, rect.height);
+        var lx = e.clientX - rect.left;
+        var ly = e.clientY - rect.top;
+        return {
+          x: clamp(lx / Math.max(1, rect.width), 0, 1),
+          y: clamp(ly / Math.max(1, rect.height), 0, 1),
+          px: lx * sx,
+          py: ly * sy
+        };
+      }
+
       window.addEventListener('resize', resize);
       window.addEventListener('pointermove', function (e) {
-        pointer.x = e.clientX / Math.max(1, W);
-        pointer.y = e.clientY / Math.max(1, H);
+        var p = toLocal(e);
+        pointer.x = p.x;
+        pointer.y = p.y;
         pointer.active = true;
         markInput();
       });
@@ -243,16 +590,22 @@
         pointer.y = 0.5;
       });
       window.addEventListener('pointerdown', function (e) {
-        addBurst(e.clientX / Math.max(1, W), e.clientY / Math.max(1, H));
-        gust = 1;
+        var p = toLocal(e);
+        addBurst(p.x, p.y, 1);
         markInput();
       });
       window.addEventListener('keydown', function (e) {
-        if (e.key === ' ') gust = 1;
-        else if (e.key === 'ArrowLeft') windDir = -1;
-        else if (e.key === 'ArrowRight') windDir = 1;
-        else if (e.key === 'ArrowUp') {
-          for (var i = 0; i < streaks.length; i++) streaks[i].speed = Math.min(0.2, streaks[i].speed + 0.01);
+        if (e.key === ' ') {
+          gust = 1.4;
+          addBurst(0.5, 0.6, 1.6);
+        } else if (e.key === 'ArrowLeft') {
+          windDir = -1;
+        } else if (e.key === 'ArrowRight') {
+          windDir = 1;
+        } else if (e.key === 'ArrowUp') {
+          windSpeed = Math.min(2.4, windSpeed + 0.15);
+        } else if (e.key === 'ArrowDown') {
+          windSpeed = Math.max(0.3, windSpeed - 0.15);
         }
         markInput();
       });

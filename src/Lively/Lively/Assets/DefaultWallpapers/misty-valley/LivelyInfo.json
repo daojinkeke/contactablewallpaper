@@ -1,0 +1,21 @@
+{
+  "AppVersion": "2.2.1.5",
+  "Title": "雾谷",
+  "Thumbnail": "thumbnail.jpg",
+  "Preview": null,
+  "Desc": "层叠山脊、静水与呼吸的雾。画面跟随本地时间与天气：《雾谷》的雾会随时间与湿度变浓变淡，下雨起雾、入夜见星。点击可拨开一团雾。",
+  "Author": "Contactable Wallpaper",
+  "License": "",
+  "Contact": "",
+  "Type": 1,
+  "FileName": "index.html",
+  "Arguments": null,
+  "IsAbsolutePath": false,
+  "Id": null,
+  "Tags": [
+    "环境",
+    "自然",
+    "实时天气"
+  ],
+  "Version": 1
+}

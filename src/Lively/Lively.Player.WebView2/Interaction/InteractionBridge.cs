@@ -18,10 +18,17 @@ namespace Lively.Player.WebView2.Interaction
         /// <summary>契约 §6.1：页面加载完成后 2 秒内未 ready 即视为不支持。</summary>
         private const int ReadyTimeoutMilliseconds = 2000;
 
+        /// <summary>
+        /// 指标看门狗周期：显示器缩放或窗口在显示器间移动可能不触发 SizeChanged，
+        /// 只靠事件会让换算比例长期停留在旧值（表现为随 DPI 放大的错位）。
+        /// </summary>
+        private const int MetricsWatchdogIntervalMilliseconds = 5000;
+
         private readonly WebView webView;
         private readonly Action<string> log;
         private readonly object syncRoot = new object();
         private Timer readyTimeoutTimer;
+        private Timer metricsWatchdogTimer;
         private bool disposed;
         private DateTime lastErrorLogUtc = DateTime.MinValue;
 
@@ -98,7 +105,35 @@ namespace Lively.Player.WebView2.Interaction
             }
 
             IsInitialized = true;
+            StartMetricsWatchdog();
             log?.Invoke("Interaction bridge injected");
+        }
+
+        /// <summary>
+        /// 周期性重采实测比例：DPI 变化或跨显示器移动时不一定有 SizeChanged，
+        /// 没有这段兜底就会用旧比例持续换算，产生随缩放比放大的指针错位。
+        /// </summary>
+        private void StartMetricsWatchdog()
+        {
+            lock (syncRoot)
+            {
+                metricsWatchdogTimer?.Dispose();
+                metricsWatchdogTimer = new Timer(_ =>
+                {
+                    try
+                    {
+                        if (disposed || !IsInitialized)
+                            return;
+
+                        // RefreshAsync 内部会切回 UI 线程。
+                        _ = Coordinates.RefreshAsync();
+                    }
+                    catch (Exception)
+                    {
+                        // 看门狗不能因为单次采样异常中断或影响输入链路。
+                    }
+                }, null, MetricsWatchdogIntervalMilliseconds, MetricsWatchdogIntervalMilliseconds);
+            }
         }
 
         /// <summary>
@@ -339,6 +374,8 @@ namespace Lively.Player.WebView2.Interaction
             lock (syncRoot)
             {
                 CancelReadyTimeoutLocked();
+                metricsWatchdogTimer?.Dispose();
+                metricsWatchdogTimer = null;
             }
 
             try

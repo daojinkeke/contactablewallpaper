@@ -1187,7 +1187,7 @@ namespace Lively.Properties {
         }
         
         /// <summary>
-        ///   Looks up a localized string similar to Lively is minimized to systemtray, right click lively icon to continue..
+        ///   Looks up a localized string similar to Contactable Wallpaper is minimized to system tray, right click the tray icon to continue..
         /// </summary>
         public static string MinimizedTray_Text {
             get {

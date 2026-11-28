@@ -87,6 +87,8 @@ message SettingsDataModel {
     bool interaction_enabled = 75;
     bool interaction_forward_wheel = 76;
     bool interaction_forward_middle_button = 77;
+    bool interaction_forward_keyboard = 78;
+    bool allow_external_network = 79;
 }
 
 message AppRulesSettings {

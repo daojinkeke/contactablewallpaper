@@ -13,6 +13,13 @@ namespace Lively.Player.WebView2.Interaction
     /// 比例来自页面实测的 innerWidth/innerHeight 与 WebView2 客户端物理尺寸，
     /// 不使用 StartArgs.Scale（Core 传入的系数可能被 RasterizationScale 覆盖而后不准）。
     /// </summary>
+    /// <remarks>
+    /// 稳健性要点：
+    /// 1. 客户端尺寸用 Win32 GetClientRect 读取（物理像素、可跨线程调用），不用 WinForms ClientSize；
+    /// 2. 每次换算前校验实时尺寸，尺寸变化后旧比例立即作废，宁可丢帧也不按错比例换算；
+    /// 3. 非客户区偏移用 Win32 MapWindowPoints 换算，不依赖 WinForms PointToScreen 的 DPI 上下文；
+    /// 4. 比例与偏移在导航、尺寸变化、DPI 变化与看门狗周期重新采样。
+    /// </remarks>
     internal sealed class InteractionCoordinateMapper
     {
         private const string MetricsScript = @"
@@ -33,6 +40,12 @@ namespace Lively.Player.WebView2.Interaction
     };
 })()";
 
+        /// <summary>换算失败时的重采样限频，避免指针移动把采样刷爆。</summary>
+        private const int InternalRefreshIntervalMilliseconds = 300;
+
+        /// <summary>指标日志限频。</summary>
+        private const int MetricsLogIntervalMilliseconds = 2000;
+
         private readonly WebView webView;
         private readonly Action<string> log;
         private readonly object syncRoot = new object();
@@ -42,7 +55,11 @@ namespace Lively.Player.WebView2.Interaction
         private double cssPerPhysicalY = 1d;
         private int clientOffsetX;
         private int clientOffsetY;
+        private int sampledClientWidth;
+        private int sampledClientHeight;
         private DateTime lastMetricsLogUtc = DateTime.MinValue;
+        private DateTime lastInternalRefreshUtc = DateTime.MinValue;
+        private string lastLoggedSignature;
 
         public InteractionCoordinateMapper(WebView webView, Action<string> log = null)
         {
@@ -73,14 +90,45 @@ namespace Lively.Player.WebView2.Interaction
         }
 
         /// <summary>
-        /// 重新采样页面视口与客户端物理尺寸。必须在 UI 线程调用（握手完成或视口变化时）。
+        /// 重新采样页面视口与客户端物理尺寸。可在任意线程调用，
+        /// 内部会切回 UI 线程（WebView2 与句柄操作是 UI 线程亲和的）。
         /// </summary>
-        public async Task RefreshAsync()
+        public Task RefreshAsync()
         {
-            await RefreshAsync(0);
+            var view = webView;
+            if (view == null)
+                return Task.CompletedTask;
+
+            try
+            {
+                if (view.IsDisposed)
+                    return Task.CompletedTask;
+                if (view.InvokeRequired)
+                {
+                    view.BeginInvoke(new Action(() => { _ = RefreshAsync(); }));
+                    return Task.CompletedTask;
+                }
+            }
+            catch (Exception)
+            {
+                return Task.CompletedTask;
+            }
+
+            return RefreshCoreAsync(0);
         }
 
-        private async Task RefreshAsync(int attempt)
+        /// <summary>限频请求一次重采样（换算失败或检测到尺寸变化时使用）。</summary>
+        public void RequestRefresh()
+        {
+            var now = DateTime.UtcNow;
+            if ((now - lastInternalRefreshUtc).TotalMilliseconds < InternalRefreshIntervalMilliseconds)
+                return;
+
+            lastInternalRefreshUtc = now;
+            _ = RefreshAsync();
+        }
+
+        private async Task RefreshCoreAsync(int attempt)
         {
             try
             {
@@ -96,14 +144,13 @@ namespace Lively.Player.WebView2.Interaction
                 if (measured == null)
                     return;
 
-                var client = webView.ClientSize;
-                if (client.Width <= 0 || client.Height <= 0)
+                if (!TryGetPhysicalClientSize(out var clientWidth, out var clientHeight))
                     return;
                 if (!IsPositive(measured.InnerWidth) || !IsPositive(measured.InnerHeight))
                     return;
 
-                var scaleX = measured.InnerWidth / client.Width;
-                var scaleY = measured.InnerHeight / client.Height;
+                var scaleX = measured.InnerWidth / clientWidth;
+                var scaleY = measured.InnerHeight / clientHeight;
                 if (!IsPositive(scaleX) || !IsPositive(scaleY))
                     return;
 
@@ -116,16 +163,18 @@ namespace Lively.Player.WebView2.Interaction
                     cssPerPhysicalY = scaleY;
                     clientOffsetX = offset.X;
                     clientOffsetY = offset.Y;
+                    sampledClientWidth = clientWidth;
+                    sampledClientHeight = clientHeight;
                 }
 
-                LogMetrics(measured, client, scaleX, scaleY, offset);
+                LogMetrics(measured, clientWidth, clientHeight, scaleX, scaleY, offset);
 
                 // Chromium 的布局视口在窗口尺寸变化后会滞后于宿主。实测视口与客户区
                 // 不一致说明拿到的是旧布局，稍后重采（最多 2 次），避免比例长期偏差。
-                if (attempt < 2 && !IsViewportConsistent(measured, client))
+                if (attempt < 2 && !IsViewportConsistent(measured, clientWidth, clientHeight))
                 {
                     await Task.Delay(250);
-                    await RefreshAsync(attempt + 1);
+                    await RefreshCoreAsync(attempt + 1);
                 }
             }
             catch (Exception ex)
@@ -137,12 +186,12 @@ namespace Lively.Player.WebView2.Interaction
         /// <summary>
         /// 页面视口换算成设备像素后应与客户区物理尺寸一致；不一致通常意味着布局尚未跟上窗口尺寸。
         /// </summary>
-        private static bool IsViewportConsistent(PageViewportMetrics measured, Size client)
+        private static bool IsViewportConsistent(PageViewportMetrics measured, int clientWidth, int clientHeight)
         {
             var dpr = IsPositive(measured.DevicePixelRatio) ? measured.DevicePixelRatio : 1d;
-            var tolerance = 0.02 * Math.Max(1, Math.Max(client.Width, client.Height));
-            return Math.Abs(measured.InnerWidth * dpr - client.Width) <= tolerance &&
-                   Math.Abs(measured.InnerHeight * dpr - client.Height) <= tolerance;
+            var tolerance = 0.02 * Math.Max(1, Math.Max(clientWidth, clientHeight));
+            return Math.Abs(measured.InnerWidth * dpr - clientWidth) <= tolerance &&
+                   Math.Abs(measured.InnerHeight * dpr - clientHeight) <= tolerance;
         }
 
         /// <summary>
@@ -151,20 +200,37 @@ namespace Lively.Player.WebView2.Interaction
         /// </summary>
         public bool TryToCss(Point localPhysical, out double cssX, out double cssY)
         {
+            cssX = 0;
+            cssY = 0;
+
+            double scaleX, scaleY;
+            int offsetX, offsetY, sampledWidth, sampledHeight;
             lock (syncRoot)
             {
                 if (metrics == null)
-                {
-                    cssX = 0;
-                    cssY = 0;
                     return false;
-                }
 
-                cssX = (localPhysical.X - clientOffsetX) * cssPerPhysicalX;
-                cssY = (localPhysical.Y - clientOffsetY) * cssPerPhysicalY;
-                return !double.IsNaN(cssX) && !double.IsNaN(cssY) &&
-                       !double.IsInfinity(cssX) && !double.IsInfinity(cssY);
+                scaleX = cssPerPhysicalX;
+                scaleY = cssPerPhysicalY;
+                offsetX = clientOffsetX;
+                offsetY = clientOffsetY;
+                sampledWidth = sampledClientWidth;
+                sampledHeight = sampledClientHeight;
             }
+
+            // 客户区尺寸变了（分辨率/窗口尺寸/DPI 布局变化），旧比例立即作废。
+            // 按旧比例换算会直接产生随缩放比放大的错位，宁可丢帧并触发重采样。
+            if (TryGetPhysicalClientSize(out var liveWidth, out var liveHeight) &&
+                (liveWidth != sampledWidth || liveHeight != sampledHeight))
+            {
+                RequestRefresh();
+                return false;
+            }
+
+            cssX = (localPhysical.X - offsetX) * scaleX;
+            cssY = (localPhysical.Y - offsetY) * scaleY;
+            return !double.IsNaN(cssX) && !double.IsNaN(cssY) &&
+                   !double.IsInfinity(cssX) && !double.IsInfinity(cssY);
         }
 
         /// <summary>导航切换时清空实测值，等待新文档重新采样。</summary>
@@ -173,6 +239,37 @@ namespace Lively.Player.WebView2.Interaction
             lock (syncRoot)
             {
                 metrics = null;
+                sampledClientWidth = 0;
+                sampledClientHeight = 0;
+            }
+        }
+
+        /// <summary>
+        /// 读取客户端物理尺寸。优先用 Win32 GetClientRect（物理像素且不做 DPI 虚拟化），
+        /// 句柄尚未创建时退回 WinForms ClientSize。
+        /// </summary>
+        private bool TryGetPhysicalClientSize(out int width, out int height)
+        {
+            width = 0;
+            height = 0;
+            try
+            {
+                var handle = webView?.Handle ?? IntPtr.Zero;
+                if (handle != IntPtr.Zero && NativeMethods.GetClientRect(handle, out var rect))
+                {
+                    width = rect.Right - rect.Left;
+                    height = rect.Bottom - rect.Top;
+                    return width > 0 && height > 0;
+                }
+
+                var size = webView?.ClientSize ?? Size.Empty;
+                width = size.Width;
+                height = size.Height;
+                return width > 0 && height > 0;
+            }
+            catch (Exception)
+            {
+                return false;
             }
         }
 
@@ -186,12 +283,16 @@ namespace Lively.Player.WebView2.Interaction
             try
             {
                 var topLevel = webView.TopLevelControl;
-                if (topLevel == null || topLevel.Handle == IntPtr.Zero)
+                var handle = webView.Handle;
+                if (topLevel == null || handle == IntPtr.Zero || topLevel.Handle == IntPtr.Zero)
                     return Point.Empty;
-                if (NativeMethods.GetWindowRect(topLevel.Handle, out NativeMethods.RECT rect) == 0)
+                if (NativeMethods.GetWindowRect(topLevel.Handle, out var rect) == 0)
                     return Point.Empty;
 
-                var clientOrigin = webView.PointToScreen(Point.Empty);
+                // MapWindowPoints(hwnd, IntPtr.Zero) 即 ClientToScreen，返回物理像素；
+                // 不使用 WinForms PointToScreen，避免其在部分 .NET Framework DPI 上下文下的虚拟化差异。
+                var clientOrigin = Point.Empty;
+                NativeMethods.MapWindowPoints(handle, IntPtr.Zero, ref clientOrigin, 1);
                 return new Point(clientOrigin.X - rect.Left, clientOrigin.Y - rect.Top);
             }
             catch (Exception)
@@ -200,18 +301,33 @@ namespace Lively.Player.WebView2.Interaction
             }
         }
 
-        private void LogMetrics(PageViewportMetrics measured, Size client, double scaleX, double scaleY, Point offset)
+        private void LogMetrics(PageViewportMetrics measured, int clientWidth, int clientHeight,
+            double scaleX, double scaleY, Point offset)
         {
+            // 相同指标不重复刷日志；看门狗会周期性采样，必须避免日志无限增长。
+            var signature = string.Format("{0:0.###}|{1:0.#}x{2:0.#}|{3}x{4}|{5:0.####}x{6:0.####}|{7},{8}",
+                measured.DevicePixelRatio, measured.InnerWidth, measured.InnerHeight,
+                clientWidth, clientHeight, scaleX, scaleY, offset.X, offset.Y);
+            if (string.Equals(signature, lastLoggedSignature, StringComparison.Ordinal))
+                return;
+
+            var now = DateTime.UtcNow;
+            if ((now - lastMetricsLogUtc).TotalMilliseconds < MetricsLogIntervalMilliseconds)
+                return;
+
+            lastMetricsLogUtc = now;
+            lastLoggedSignature = signature;
+
             // devicePixelRatio 是页面自报的理论比例，实测比例来自 CSS 布局尺寸与物理客户区，
             // 两者偏差直接反映 WebView2 DPI 感知/RasterizationScale 的实测差异。
             var dprDerived = IsPositive(measured.DevicePixelRatio) ? 1d / measured.DevicePixelRatio : 0d;
             var deviation = dprDerived > 0 ? Math.Abs(dprDerived - scaleX) / dprDerived : 0d;
 
-            LogThrottled(string.Format(
+            log?.Invoke(string.Format(
                 "Interaction metrics: dpr={0:0.###}, inner={1:0.##}x{2:0.##}css, client={3}x{4}px, " +
                 "cssPerPhysical={5:0.####}/{6:0.####}, dprDerived={7:0.####}, deviation={8:0.###%}, " +
                 "visualViewport={9:0.##}x{10:0.##}@{11:0.###}, offset={12},{13}",
-                measured.DevicePixelRatio, measured.InnerWidth, measured.InnerHeight, client.Width, client.Height,
+                measured.DevicePixelRatio, measured.InnerWidth, measured.InnerHeight, clientWidth, clientHeight,
                 scaleX, scaleY, dprDerived, deviation,
                 measured.VisualViewportWidth, measured.VisualViewportHeight, measured.VisualViewportScale,
                 offset.X, offset.Y));

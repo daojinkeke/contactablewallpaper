@@ -31,6 +31,16 @@ namespace Lively.Ai
     {
         private const int MaxPromptLength = 2000;
 
+        /// <summary>
+        /// 超过该体积（UTF-8 字节）的壁纸不再整份重写：模型单次输出上限（如 DeepSeek 约 8K token）
+        /// 会让整篇重写在 </html> 之前被截断，改为少量定点 find/replace。
+        /// </summary>
+        private const int LargeDocumentBytes = 6 * 1024;
+
+        /// <summary>失败时给用户的可执行建议，避免只说“重试”。</summary>
+        private const string ConcreteEditHint =
+            "请把诉求改得更具体，例如指定颜色、速度或位置：「把背景改成深蓝」「粒子速度减半」「把光晕移到右下角」，再试一次。";
+
         private readonly AiSettingsStore settingsStore;
         private readonly OpenAiCompatibleClient client;
         private readonly IHtmlWallpaperValidator validator;
@@ -99,6 +109,7 @@ namespace Lively.Ai
                 var maxAttempts = 1 + Math.Max(0, Math.Min(2, settings.MaxRepairAttempts));
                 string content = string.Empty;
                 ValidationResult lastIssues = null;
+                var usePatchRepair = false;
 
                 for (var attempt = 1; attempt <= maxAttempts; attempt++)
                 {
@@ -106,126 +117,180 @@ namespace Lively.Ai
                     job.State = attempt == 1 ? GenerationState.generating : GenerationState.repairing;
                     yield return CreateEvent(jobId, job, issues: lastIssues);
 
-                    var userPrompt = attempt == 1
-                        ? PromptBuilder.BuildUserPrompt(request)
-                        : PromptBuilder.BuildRepairPrompt(request, content, lastIssues);
+                    ValidationResult validation = null;
+                    var truncated = false;
 
-                    var builder = new StringBuilder();
-                    var cancellation = job.Cancellation;
-                    bool canceled = false;
-                    AiGenerationException failure = null;
-                    var reqPromptTokens = 0;
-                    var reqCompletionTokens = 0;
-                    var reqTotalTokens = 0;
-
-                    await using (var enumerator = client
-                        .StreamCompletionAsync(settings, apiKey, PromptBuilder.SystemPrompt, userPrompt, cancellation.Token)
-                        .GetAsyncEnumerator(cancellation.Token))
+                    if (usePatchRepair)
                     {
-                        while (true)
+                        // 大文件或上一轮被截断：不再整篇重写，只让模型返回少量定点替换。
+                        var repair = await ProducePatchCandidateAsync(
+                                job, settings, apiKey, request, jobId, attempt, content,
+                                PromptBuilder.PatchSystemPrompt,
+                                PromptBuilder.BuildRepairPatchPrompt(request, content, lastIssues))
+                            .ConfigureAwait(false);
+
+                        if (repair.Canceled)
                         {
-                            bool moved;
-                            try
-                            {
-                                moved = await enumerator.MoveNextAsync().ConfigureAwait(false);
-                            }
-                            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
-                            {
-                                canceled = true;
-                                break;
-                            }
-                            catch (AiGenerationException ex)
-                            {
-                                failure = ex;
-                                break;
-                            }
-                            catch (Exception ex)
-                            {
-                                failure = new AiGenerationException(AiFailureKind.Protocol, "生成过程出错：" + ex.Message, ex);
-                                break;
-                            }
-
-                            if (!moved)
-                                break;
-
-                            var chunk = enumerator.Current;
-                            if (chunk == null)
-                                continue;
-
-                            if (chunk.PromptTokens.HasValue)
-                                reqPromptTokens = chunk.PromptTokens.Value;
-                            if (chunk.CompletionTokens.HasValue)
-                                reqCompletionTokens = chunk.CompletionTokens.Value;
-                            if (chunk.TotalTokens.HasValue)
-                                reqTotalTokens = chunk.TotalTokens.Value;
-
-                            job.PromptTokens = job.AccPromptTokens + reqPromptTokens;
-                            job.CompletionTokens = job.AccCompletionTokens + reqCompletionTokens;
-                            job.TotalTokens = job.AccTotalTokens + reqTotalTokens;
-
-                            if (string.IsNullOrEmpty(chunk.Content))
-                                continue;
-
-                            builder.Append(chunk.Content);
-                            yield return new GenerationEvent
-                            {
-                                JobId = jobId,
-                                State = job.State,
-                                ContentDelta = chunk.Content,
-                                Attempt = attempt,
-                                PromptTokens = job.PromptTokens,
-                                CompletionTokens = job.CompletionTokens,
-                                TotalTokens = job.TotalTokens,
-                                ElapsedMs = job.Watch.ElapsedMilliseconds
-                            };
+                            job.State = GenerationState.canceled;
+                            yield return CreateEvent(jobId, job);
+                            yield break;
                         }
+                        if (repair.Failure != null)
+                        {
+                            job.State = GenerationState.failed;
+                            job.ErrorCode = repair.Failure.ErrorCode;
+                            job.ErrorMessage = repair.Failure.Message;
+                            yield return CreateEvent(jobId, job);
+                            yield break;
+                        }
+                        if (!repair.Success)
+                        {
+                            if (attempt >= maxAttempts)
+                            {
+                                job.State = GenerationState.failed;
+                                job.ErrorCode = AiErrorCodes.ValidationFailed;
+                                job.ErrorMessage = repair.ErrorMessage;
+                                yield return CreateEvent(jobId, job, issues: repair.Validation);
+                                yield break;
+                            }
+                            if (repair.Validation != null)
+                                lastIssues = repair.Validation;
+                            continue;
+                        }
+
+                        content = repair.Html;
+                        job.Content = content;
+                        job.DraftPath = SaveDraft(jobId, content);
+                        validation = repair.Validation;
                     }
-
-                    job.AccPromptTokens += reqPromptTokens;
-                    job.AccCompletionTokens += reqCompletionTokens;
-                    job.AccTotalTokens += reqTotalTokens;
-                    job.PromptTokens = job.AccPromptTokens;
-                    job.CompletionTokens = job.AccCompletionTokens;
-                    job.TotalTokens = job.AccTotalTokens;
-
-                    content = ExtractHtml(builder.ToString());
-                    job.Content = content;
-                    job.DraftPath = SaveDraft(jobId, content);
-
-                    if (canceled)
+                    else
                     {
-                        job.State = GenerationState.canceled;
+                        var userPrompt = attempt == 1
+                            ? PromptBuilder.BuildUserPrompt(request)
+                            : PromptBuilder.BuildRepairPrompt(request, content, lastIssues);
+
+                        var builder = new StringBuilder();
+                        var cancellation = job.Cancellation;
+                        bool canceled = false;
+                        AiGenerationException failure = null;
+                        var reqPromptTokens = 0;
+                        var reqCompletionTokens = 0;
+                        var reqTotalTokens = 0;
+                        string finishReason = null;
+
+                        await using (var enumerator = client
+                            .StreamCompletionAsync(settings, apiKey, PromptBuilder.SystemPrompt, userPrompt, cancellation.Token)
+                            .GetAsyncEnumerator(cancellation.Token))
+                        {
+                            while (true)
+                            {
+                                bool moved;
+                                try
+                                {
+                                    moved = await enumerator.MoveNextAsync().ConfigureAwait(false);
+                                }
+                                catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+                                {
+                                    canceled = true;
+                                    break;
+                                }
+                                catch (AiGenerationException ex)
+                                {
+                                    failure = ex;
+                                    break;
+                                }
+                                catch (Exception ex)
+                                {
+                                    failure = new AiGenerationException(AiFailureKind.Protocol, "生成过程出错：" + ex.Message, ex);
+                                    break;
+                                }
+
+                                if (!moved)
+                                    break;
+
+                                var chunk = enumerator.Current;
+                                if (chunk == null)
+                                    continue;
+
+                                if (chunk.PromptTokens.HasValue)
+                                    reqPromptTokens = chunk.PromptTokens.Value;
+                                if (chunk.CompletionTokens.HasValue)
+                                    reqCompletionTokens = chunk.CompletionTokens.Value;
+                                if (chunk.TotalTokens.HasValue)
+                                    reqTotalTokens = chunk.TotalTokens.Value;
+                                if (!string.IsNullOrEmpty(chunk.FinishReason))
+                                    finishReason = chunk.FinishReason;
+
+                                job.PromptTokens = job.AccPromptTokens + reqPromptTokens;
+                                job.CompletionTokens = job.AccCompletionTokens + reqCompletionTokens;
+                                job.TotalTokens = job.AccTotalTokens + reqTotalTokens;
+
+                                if (string.IsNullOrEmpty(chunk.Content))
+                                    continue;
+
+                                builder.Append(chunk.Content);
+                                yield return new GenerationEvent
+                                {
+                                    JobId = jobId,
+                                    State = job.State,
+                                    ContentDelta = chunk.Content,
+                                    Attempt = attempt,
+                                    PromptTokens = job.PromptTokens,
+                                    CompletionTokens = job.CompletionTokens,
+                                    TotalTokens = job.TotalTokens,
+                                    ElapsedMs = job.Watch.ElapsedMilliseconds
+                                };
+                            }
+                        }
+
+                        job.AccPromptTokens += reqPromptTokens;
+                        job.AccCompletionTokens += reqCompletionTokens;
+                        job.AccTotalTokens += reqTotalTokens;
+                        job.PromptTokens = job.AccPromptTokens;
+                        job.CompletionTokens = job.AccCompletionTokens;
+                        job.TotalTokens = job.AccTotalTokens;
+
+                        content = ExtractHtml(builder.ToString());
+                        job.Content = content;
+                        job.DraftPath = SaveDraft(jobId, content);
+
+                        if (canceled)
+                        {
+                            job.State = GenerationState.canceled;
+                            yield return CreateEvent(jobId, job);
+                            yield break;
+                        }
+
+                        if (failure != null)
+                        {
+                            job.State = GenerationState.failed;
+                            job.ErrorCode = failure.ErrorCode;
+                            job.ErrorMessage = failure.Message;
+                            yield return CreateEvent(jobId, job);
+                            yield break;
+                        }
+
+                        job.State = GenerationState.validating;
                         yield return CreateEvent(jobId, job);
-                        yield break;
+
+                        if (string.IsNullOrWhiteSpace(content))
+                        {
+                            job.State = GenerationState.failed;
+                            job.ErrorCode = AiErrorCodes.ValidationFailed;
+                            job.ErrorMessage = "AI 没有返回任何内容，请重试。";
+                            yield return CreateEvent(jobId, job);
+                            yield break;
+                        }
+
+                        truncated = string.Equals(finishReason, "length", StringComparison.OrdinalIgnoreCase) ||
+                                    !IsCompleteHtml(content);
+                        validation = validator.Validate(job.DraftPath, CreateValidationOptions(request));
+                        lastIssues = validation;
                     }
-
-                    if (failure != null)
-                    {
-                        job.State = GenerationState.failed;
-                        job.ErrorCode = failure.ErrorCode;
-                        job.ErrorMessage = failure.Message;
-                        yield return CreateEvent(jobId, job);
-                        yield break;
-                    }
-
-                    job.State = GenerationState.validating;
-                    yield return CreateEvent(jobId, job);
-
-                    if (string.IsNullOrWhiteSpace(content))
-                    {
-                        job.State = GenerationState.failed;
-                        job.ErrorCode = AiErrorCodes.ValidationFailed;
-                        job.ErrorMessage = "AI 没有返回任何内容，请重试。";
-                        yield return CreateEvent(jobId, job);
-                        yield break;
-                    }
-
-                    var validation = validator.Validate(job.DraftPath, CreateValidationOptions(request));
-                    lastIssues = validation;
 
                     if (validation.IsValid)
                     {
-                        // Self-Refine：评分低于阈值时带着具体批评重写；每轮都重新过 V001–V009。
+                        // Self-Refine：评分低于阈值时带着具体批评重写；每轮都重新过 V001–V008。
                         await foreach (var refineEvent in RunRefinementAsync(jobId, job, request, settings, apiKey, content)
                             .ConfigureAwait(false))
                         {
@@ -247,10 +312,17 @@ namespace Lively.Ai
                     {
                         job.State = GenerationState.failed;
                         job.ErrorCode = AiErrorCodes.ValidationFailed;
-                        job.ErrorMessage = BuildValidationMessage(validation);
+                        job.ErrorMessage = truncated
+                            ? "AI 输出达到单次上限被截断，未能返回完整页面，本次结果未保存。" + ConcreteEditHint
+                            : BuildValidationMessage(validation);
                         yield return CreateEvent(jobId, job, issues: validation);
                         yield break;
                     }
+
+                    // 有完整底稿时改用定点修复，避免整篇重写再次撞上输出上限；
+                    // 若已被截断（缺 </html>），没有可编辑的底稿，只能整篇重试。
+                    if (IsCompleteHtml(content))
+                        usePatchRepair = true;
                 }
             }
             finally
@@ -301,9 +373,8 @@ namespace Lively.Ai
             yield return CreateEvent(jobId, job);
 
             job.DraftPath = SaveDraft(jobId, html);
-            // 内置模板是固定产物，不做交互能力检查（V009 只约束 AI 生成结果）。
+            // 内置模板是固定产物，只做离线/尺寸等硬约束校验。
             var templateOptions = CreateValidationOptions(request);
-            templateOptions.RequiredInteraction = InteractionCapability.none;
             var validation = validator.Validate(job.DraftPath, templateOptions);
             if (validation.IsValid)
             {
@@ -331,6 +402,8 @@ namespace Lively.Ai
             string instruction,
             GenerationRequest request,
             int? refineRounds = null,
+            RevisionAttachment attachment = null,
+            string referenceDescription = null,
             [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
             var sessionStore = new WallpaperSessionStore();
@@ -384,6 +457,7 @@ namespace Lively.Ai
                 .ToList();
 
             ValidationResult lastValidation = null;
+            string attachmentFile = null;
             for (var round = 1; round <= maxRounds; round++)
             {
                 // 以「整轮」为口径统计成本：包含本轮的计划/评分请求 + 重写请求。
@@ -401,7 +475,7 @@ namespace Lively.Ai
 
                 var plan = await CollectCompletionAsync(job, settings, apiKey,
                         PromptBuilder.CritiqueSystemPrompt,
-                        PromptBuilder.BuildCritiquePrompt(request, current, instruction, history),
+                        PromptBuilder.BuildCritiquePrompt(request, current, instruction, history, referenceDescription),
                         job.Cancellation.Token)
                     .ConfigureAwait(false);
 
@@ -425,7 +499,9 @@ namespace Lively.Ai
                 {
                     job.State = GenerationState.failed;
                     job.ErrorCode = AiErrorCodes.ProtocolError;
-                    job.ErrorMessage = "模型返回的计划/评分不是可解析的 JSON，未修改任何版本。";
+                    job.ErrorMessage = plan.Truncated
+                        ? "生成修改计划时输出被截断（达到单次输出上限），未修改任何版本。请把诉求写得更短、更具体后重试。"
+                        : "模型返回的计划/评分不是可解析的 JSON，未修改任何版本。";
                     yield return CreateEvent(jobId, job);
                     yield break;
                 }
@@ -438,60 +514,58 @@ namespace Lively.Ai
                 job.State = GenerationState.refining;
                 yield return CreateEvent(jobId, job);
 
-                var rewrite = await CollectCompletionAsync(job, settings, apiKey,
+                var candidateResult = await ProduceRevisionCandidateAsync(
+                        job, settings, apiKey, request, jobId, round, current,
                         PromptBuilder.SystemPrompt,
                         PromptBuilder.BuildRevisionPrompt(request, current, instruction, parsed.PlanText,
-                            parsed.Rationale, parsed.Overall, parsed.Issues, parsed.Fixes, history),
-                        job.Cancellation.Token)
+                            parsed.Rationale, parsed.Overall, parsed.Issues, parsed.Fixes, history, referenceDescription),
+                        PromptBuilder.PatchSystemPrompt,
+                        PromptBuilder.BuildRevisionPatchPrompt(request, current, instruction, parsed.PlanText,
+                            parsed.Rationale, parsed.Overall, parsed.Issues, parsed.Fixes, history, referenceDescription),
+                        IsLargeDocument(current))
                     .ConfigureAwait(false);
 
-                if (rewrite.Canceled)
+                if (candidateResult.Canceled)
                 {
                     job.State = GenerationState.canceled;
                     yield return CreateEvent(jobId, job);
                     yield break;
                 }
-                if (rewrite.Failure != null)
+                if (candidateResult.Failure != null)
                 {
                     job.State = GenerationState.failed;
-                    job.ErrorCode = rewrite.Failure.ErrorCode;
-                    job.ErrorMessage = rewrite.Failure.Message;
+                    job.ErrorCode = candidateResult.Failure.ErrorCode;
+                    job.ErrorMessage = candidateResult.Failure.Message;
                     yield return CreateEvent(jobId, job);
                     yield break;
                 }
-
-                var candidate = ExtractHtml(rewrite.Text);
-                if (string.IsNullOrWhiteSpace(candidate))
+                if (!candidateResult.Success)
                 {
                     job.State = GenerationState.failed;
                     job.ErrorCode = AiErrorCodes.ValidationFailed;
-                    job.ErrorMessage = "修改请求返回空内容，会话未改动。";
-                    yield return CreateEvent(jobId, job);
+                    job.ErrorMessage = candidateResult.ErrorMessage;
+                    yield return CreateEvent(jobId, job, issues: candidateResult.Validation);
                     yield break;
                 }
 
-                var candidatePath = SaveDraftCandidate(jobId, round, candidate);
-                var validation = validator.Validate(candidatePath, CreateValidationOptions(request));
-                if (!validation.IsValid)
-                {
-                    job.State = GenerationState.failed;
-                    job.ErrorCode = AiErrorCodes.ValidationFailed;
-                    job.ErrorMessage = BuildValidationMessage(validation);
-                    yield return CreateEvent(jobId, job, issues: validation);
-                    yield break;
-                }
-
+                var candidate = candidateResult.Html;
+                var validation = candidateResult.Validation;
                 current = candidate;
                 job.Content = current;
                 job.DraftPath = SaveDraft(jobId, current);
                 lastValidation = validation;
 
                 var summary = BuildRevisionSummary(instruction, parsed.PlanSteps);
+                if (candidateResult.UsedPatch)
+                    summary = summary.Length <= 190 ? summary + "（定点修改）" : summary;
+                if (attachment != null && string.IsNullOrEmpty(attachmentFile))
+                    attachmentFile = sessionStore.ImportAttachment(session.SessionId, attachment.SourcePath);
                 var entry = sessionStore.AppendVersion(session, current, instruction, summary, parsed.PlanText,
                     parsed.Overall, job.Watch.ElapsedMilliseconds - elapsedBefore,
                     job.AccPromptTokens - promptTokensBefore,
                     job.AccCompletionTokens - completionTokensBefore,
-                    job.AccTotalTokens - totalTokensBefore);
+                    job.AccTotalTokens - totalTokensBefore,
+                    attachmentFile, attachment?.DisplayName, referenceDescription);
                 job.SessionVersion = entry.Version;
                 history.Add("v" + entry.Version + "：" + summary);
 
@@ -513,9 +587,13 @@ namespace Lively.Ai
                 var summary = string.IsNullOrWhiteSpace(job.RefinePlan)
                     ? "初始生成"
                     : "初始生成：" + FirstLines(job.RefinePlan, 2);
+                var attachmentFile = string.IsNullOrWhiteSpace(request.ReferenceImagePath)
+                    ? null
+                    : store.ImportAttachment(session.SessionId, request.ReferenceImagePath);
                 var entry = store.AppendVersion(session, job.Content, string.Empty, summary, job.RefinePlan,
                     job.RefineScore, job.Watch?.ElapsedMilliseconds ?? 0,
-                    job.AccPromptTokens, job.AccCompletionTokens, job.AccTotalTokens);
+                    job.AccPromptTokens, job.AccCompletionTokens, job.AccTotalTokens,
+                    attachmentFile, request.ReferenceImageName, request.ReferenceImageDescription);
                 job.SessionId = session.SessionId;
                 job.SessionVersion = entry.Version;
             }
@@ -541,7 +619,7 @@ namespace Lively.Ai
 
         /// <summary>
         /// Self-Refine：先让模型按五个维度评分，低于阈值时带着具体批评整篇重写。
-        /// 每轮候选都必须重新通过 V001–V009；未通过校验的候选直接丢弃，保留上一版有效产物。
+        /// 每轮候选都必须重新通过 V001–V008；未通过校验的候选直接丢弃，保留上一版有效产物。
         /// </summary>
         private async IAsyncEnumerable<GenerationEvent> RunRefinementAsync(
             string jobId,
@@ -605,53 +683,325 @@ namespace Lively.Ai
                 job.State = GenerationState.refining;
                 yield return CreateEvent(jobId, job);
 
-                var rewrite = await CollectCompletionAsync(job, settings, apiKey,
+                var candidateResult = await ProduceRevisionCandidateAsync(
+                        job, settings, apiKey, request, jobId, round, current,
                         PromptBuilder.SystemPrompt,
                         PromptBuilder.BuildRefinePrompt(request, current, parsed.Overall, parsed.Issues, parsed.Fixes,
                             parsed.PlanText, parsed.Rationale),
-                        job.Cancellation.Token)
+                        PromptBuilder.PatchSystemPrompt,
+                        PromptBuilder.BuildRefinePatchPrompt(request, current, parsed.Overall, parsed.Issues, parsed.Fixes,
+                            parsed.PlanText, parsed.Rationale),
+                        IsLargeDocument(current))
                     .ConfigureAwait(false);
 
-                if (rewrite.Canceled)
+                if (candidateResult.Canceled)
                 {
                     job.State = GenerationState.canceled;
                     yield return CreateEvent(jobId, job);
                     yield break;
                 }
-                if (rewrite.Failure != null)
+                if (candidateResult.Failure != null || !candidateResult.Success)
                 {
                     job.RefineSummary = AppendSummary(job.RefineSummary,
-                        "第 " + round + " 轮重写失败，保留上一版");
+                        "第 " + round + " 轮未生效，保留上一版");
                     yield return CreateEvent(jobId, job);
                     break;
                 }
 
-                var candidate = ExtractHtml(rewrite.Text);
-                if (string.IsNullOrWhiteSpace(candidate))
-                {
-                    job.RefineSummary = AppendSummary(job.RefineSummary,
-                        "第 " + round + " 轮返回为空，保留上一版");
-                    yield return CreateEvent(jobId, job);
-                    break;
-                }
-
-                var candidatePath = SaveDraftCandidate(jobId, round, candidate);
-                var validation = validator.Validate(candidatePath, CreateValidationOptions(request));
-                if (!validation.IsValid)
-                {
-                    job.RefineSummary = AppendSummary(job.RefineSummary,
-                        "第 " + round + " 轮未通过校验，保留上一版");
-                    yield return CreateEvent(jobId, job);
-                    break;
-                }
-
-                current = candidate;
+                current = candidateResult.Html;
                 job.Content = current;
                 job.DraftPath = SaveDraft(jobId, current);
             }
 
             job.Content = current;
             job.DraftPath = SaveDraft(jobId, current);
+        }
+
+        /// <summary>
+        /// 产出一次续改候选：小文件先整篇改写，截断或校验失败时自动回退到定点修改；
+        /// 超过 6 KB 的文件直接走定点修改，避免整篇输出撞上单次 token 上限。
+        /// </summary>
+        private async Task<CandidateResult> ProduceRevisionCandidateAsync(
+            JobState job,
+            AiSettings settings,
+            string apiKey,
+            GenerationRequest request,
+            string jobId,
+            int round,
+            string currentHtml,
+            string fullSystemPrompt,
+            string fullUserPrompt,
+            string patchSystemPrompt,
+            string patchUserPrompt,
+            bool preferPatch)
+        {
+            if (preferPatch)
+            {
+                return await ProducePatchCandidateAsync(job, settings, apiKey, request, jobId, round, currentHtml,
+                        patchSystemPrompt, patchUserPrompt)
+                    .ConfigureAwait(false);
+            }
+
+            var full = await CollectCompletionAsync(job, settings, apiKey, fullSystemPrompt, fullUserPrompt, job.Cancellation.Token)
+                .ConfigureAwait(false);
+            if (full.Canceled)
+                return new CandidateResult { Canceled = true };
+            if (full.Failure != null)
+                return new CandidateResult { Failure = full.Failure };
+
+            var html = ExtractHtml(full.Text);
+            var truncated = full.Truncated || !IsCompleteHtml(html);
+            if (!truncated && !string.IsNullOrWhiteSpace(html))
+            {
+                var path = SaveCandidateDraft(jobId, round, "full", html);
+                var validation = validator.Validate(path, CreateValidationOptions(request));
+                if (validation.IsValid)
+                    return new CandidateResult { Success = true, Html = html, Validation = validation };
+
+                patchUserPrompt = patchUserPrompt + Environment.NewLine +
+                    "A full rewrite was attempted but failed validation (" + FirstFatalMessage(validation) +
+                    "). Do not repeat it; return targeted edits only.";
+            }
+            else
+            {
+                patchUserPrompt = patchUserPrompt + Environment.NewLine +
+                    "A full rewrite was attempted but the output was truncated before </html>. " +
+                    "Do not rewrite the document; return targeted edits only.";
+            }
+
+            var patchResult = await ProducePatchCandidateAsync(job, settings, apiKey, request, jobId, round, currentHtml,
+                    patchSystemPrompt, patchUserPrompt)
+                .ConfigureAwait(false);
+            if (patchResult.Success || patchResult.Canceled || patchResult.Failure != null)
+                return patchResult;
+
+            if (truncated)
+                patchResult.ErrorMessage = "整篇改写被截断（达到单次输出上限），" + patchResult.ErrorMessage;
+            return patchResult;
+        }
+
+        /// <summary>
+        /// 只走定点修改：解析 find/replace JSON，校验每处唯一匹配后应用，再走 V001–V008。
+        /// </summary>
+        private async Task<CandidateResult> ProducePatchCandidateAsync(
+            JobState job,
+            AiSettings settings,
+            string apiKey,
+            GenerationRequest request,
+            string jobId,
+            int round,
+            string currentHtml,
+            string patchSystemPrompt,
+            string patchUserPrompt)
+        {
+            var patch = await CollectCompletionAsync(job, settings, apiKey, patchSystemPrompt, patchUserPrompt,
+                    job.Cancellation.Token)
+                .ConfigureAwait(false);
+            if (patch.Canceled)
+                return new CandidateResult { Canceled = true };
+            if (patch.Failure != null)
+                return new CandidateResult { Failure = patch.Failure };
+
+            if (patch.Truncated)
+                return PatchFailure("模型返回的定点修改被截断（达到单次输出上限），本次修改未生效，当前版本保持不变。" +
+                                    ConcreteEditHint);
+
+            if (!TryParsePatchEdits(patch.Text, out var edits, out var parseError))
+                return PatchFailure("模型没有返回可用的定点修改（" + parseError + "），本次修改未生效，当前版本保持不变。" +
+                                    ConcreteEditHint);
+
+            if (!TryApplyPatchEdits(currentHtml, edits, out var patched, out var applyError))
+                return PatchFailure("定点修改无法唯一定位代码（" + applyError + "），本次修改未生效，当前版本保持不变。" +
+                                    ConcreteEditHint);
+
+            var path = SaveCandidateDraft(jobId, round, "patch", patched);
+            var validation = validator.Validate(path, CreateValidationOptions(request));
+            if (!validation.IsValid)
+            {
+                var failed = PatchFailure("定点修改已应用，但结果未通过校验：" + FirstFatalMessage(validation) +
+                                          "。本次修改未生效，当前版本保持不变。" + ConcreteEditHint);
+                failed.Validation = validation;
+                return failed;
+            }
+
+            return new CandidateResult { Success = true, UsedPatch = true, Html = patched, Validation = validation };
+        }
+
+        private static CandidateResult PatchFailure(string message) =>
+            new CandidateResult { ErrorMessage = message };
+
+        private static bool IsLargeDocument(string html) =>
+            !string.IsNullOrEmpty(html) && Encoding.UTF8.GetByteCount(html) > LargeDocumentBytes;
+
+        private static bool IsCompleteHtml(string html) =>
+            !string.IsNullOrWhiteSpace(html) &&
+            html.IndexOf("<html", StringComparison.OrdinalIgnoreCase) >= 0 &&
+            html.IndexOf("</html>", StringComparison.OrdinalIgnoreCase) >= 0;
+
+        private static string FirstFatalMessage(ValidationResult validation)
+        {
+            if (validation?.Issues != null)
+            {
+                foreach (var issue in validation.Issues)
+                {
+                    if (issue.Severity == ValidationSeverity.fatal)
+                        return issue.Message;
+                }
+            }
+            return "未知问题";
+        }
+
+        private static readonly Regex JsonFenceRegex = new Regex(
+            @"```(?:json|JSON)?\s*([\s\S]*?)```",
+            RegexOptions.Compiled);
+
+        /// <summary>
+        /// 解析模型返回的定点修改。接受 {"edits":[...]} 或直接数组；错误信息面向用户。
+        /// </summary>
+        private static bool TryParsePatchEdits(string raw, out List<PatchEdit> edits, out string error)
+        {
+            edits = new List<PatchEdit>();
+            error = string.Empty;
+
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                error = "返回为空";
+                return false;
+            }
+
+            var text = raw.Trim();
+            var fence = JsonFenceRegex.Match(text);
+            if (fence.Success)
+                text = fence.Groups[1].Value.Trim();
+
+            JToken root = null;
+            var objectStart = text.IndexOf('{');
+            var objectEnd = text.LastIndexOf('}');
+            if (objectStart >= 0 && objectEnd > objectStart)
+            {
+                try
+                {
+                    root = JToken.Parse(text.Substring(objectStart, objectEnd - objectStart + 1));
+                }
+                catch (Exception)
+                {
+                    root = null;
+                }
+            }
+
+            JArray array = null;
+            if (root is JObject obj)
+            {
+                array = obj["edits"] as JArray;
+            }
+            else if (root is JArray direct)
+            {
+                array = direct;
+            }
+            else
+            {
+                var arrayStart = text.IndexOf('[');
+                var arrayEnd = text.LastIndexOf(']');
+                if (arrayStart >= 0 && arrayEnd > arrayStart)
+                {
+                    try
+                    {
+                        array = JArray.Parse(text.Substring(arrayStart, arrayEnd - arrayStart + 1));
+                    }
+                    catch (Exception)
+                    {
+                        array = null;
+                    }
+                }
+            }
+
+            if (array == null || array.Count == 0)
+            {
+                error = "edits 为空或缺失";
+                return false;
+            }
+            if (array.Count > 8)
+            {
+                error = "edits 过多（最多 8 处）";
+                return false;
+            }
+
+            foreach (var item in array)
+            {
+                if (!(item is JObject edit))
+                {
+                    error = "edits 中存在非对象项";
+                    return false;
+                }
+
+                var find = edit["find"]?.ToString();
+                var replace = edit["replace"]?.ToString();
+                if (string.IsNullOrEmpty(find))
+                {
+                    error = "存在空的 find";
+                    return false;
+                }
+                if (find.Length > 4000)
+                {
+                    error = "find 片段过长，可能不是定点修改";
+                    return false;
+                }
+                if (replace == null)
+                {
+                    error = "存在缺少 replace 的项";
+                    return false;
+                }
+                if (string.Equals(find, replace, StringComparison.Ordinal))
+                {
+                    error = "存在 find 与 replace 相同的项";
+                    return false;
+                }
+
+                edits.Add(new PatchEdit { Find = find, Replace = replace });
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// 逐条应用替换：每处必须在当前文本中唯一出现，否则整批放弃，保证不会误改。
+        /// </summary>
+        private static bool TryApplyPatchEdits(string html, List<PatchEdit> edits, out string patched, out string error)
+        {
+            patched = html ?? string.Empty;
+            error = string.Empty;
+
+            for (var i = 0; i < edits.Count; i++)
+            {
+                var edit = edits[i];
+                var first = patched.IndexOf(edit.Find, StringComparison.Ordinal);
+                if (first < 0)
+                {
+                    error = "第 " + (i + 1) + " 处待替换片段在页面中没有找到";
+                    return false;
+                }
+                var second = patched.IndexOf(edit.Find, first + edit.Find.Length, StringComparison.Ordinal);
+                if (second >= 0)
+                {
+                    error = "第 " + (i + 1) + " 处待替换片段在页面中出现多次";
+                    return false;
+                }
+
+                patched = patched.Substring(0, first) + edit.Replace + patched.Substring(first + edit.Find.Length);
+            }
+
+            if (!IsCompleteHtml(patched))
+            {
+                error = "替换后文档不完整（缺少 <html> 或 </html>）";
+                return false;
+            }
+            if (string.Equals(patched.Trim(), (html ?? string.Empty).Trim(), StringComparison.Ordinal))
+            {
+                error = "替换没有产生任何实际改动";
+                return false;
+            }
+
+            return true;
         }
 
         /// <summary>
@@ -686,6 +1036,9 @@ namespace Lively.Ai
                         reqCompletionTokens = chunk.CompletionTokens.Value;
                     if (chunk.TotalTokens.HasValue)
                         reqTotalTokens = chunk.TotalTokens.Value;
+                    if (!string.IsNullOrEmpty(chunk.FinishReason) &&
+                        chunk.FinishReason.Equals("length", StringComparison.OrdinalIgnoreCase))
+                        result.Truncated = true;
 
                     if (!string.IsNullOrEmpty(chunk.Content))
                         builder.Append(chunk.Content);
@@ -737,7 +1090,7 @@ namespace Lively.Ai
                 {
                     double sum = 0;
                     var count = 0;
-                    foreach (var key in new[] { "composition", "color", "motion", "theme", "interaction" })
+                    foreach (var key in new[] { "composition", "color", "motion", "theme" })
                     {
                         var score = ReadScore(obj, key);
                         if (!score.HasValue)
@@ -837,11 +1190,11 @@ namespace Lively.Ai
             return string.IsNullOrEmpty(existing) ? addition : existing + "；" + addition;
         }
 
-        private static string SaveDraftCandidate(string jobId, int round, string html)
+        private static string SaveCandidateDraft(string jobId, int round, string tag, string html)
         {
             var directory = Path.Combine(Constants.CommonPaths.AiTempDir, jobId);
             Directory.CreateDirectory(directory);
-            var path = Path.Combine(directory, "candidate-r" + round + ".html");
+            var path = Path.Combine(directory, "candidate-r" + round + "-" + tag + ".html");
             File.WriteAllText(path, html ?? string.Empty, new UTF8Encoding(false));
             return path;
         }
@@ -916,10 +1269,10 @@ namespace Lively.Ai
             return new ValidationOptions
             {
                 OfflineRequired = request.OfflineRequired,
+                AllowExternalNetwork = request.AllowExternalNetwork,
                 PerformanceMode = request.PerformanceMode,
                 TargetWidth = request.TargetWidth,
-                TargetHeight = request.TargetHeight,
-                RequiredInteraction = request.Interaction
+                TargetHeight = request.TargetHeight
             };
         }
 
@@ -1003,6 +1356,26 @@ namespace Lively.Ai
             public string Text { get; set; }
             public bool Canceled { get; set; }
             public AiGenerationException Failure { get; set; }
+
+            /// <summary>服务端以 finish_reason=length 结束，说明输出撞到单次上限被截断。</summary>
+            public bool Truncated { get; set; }
+        }
+
+        private sealed class CandidateResult
+        {
+            public bool Success { get; set; }
+            public bool UsedPatch { get; set; }
+            public string Html { get; set; }
+            public ValidationResult Validation { get; set; }
+            public string ErrorMessage { get; set; }
+            public bool Canceled { get; set; }
+            public AiGenerationException Failure { get; set; }
+        }
+
+        private sealed class PatchEdit
+        {
+            public string Find { get; set; }
+            public string Replace { get; set; }
         }
 
         private sealed class CritiqueResult

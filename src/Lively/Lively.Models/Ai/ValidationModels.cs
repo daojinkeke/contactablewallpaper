@@ -19,12 +19,13 @@ namespace Lively.Models.Ai
         public int TargetWidth { get; set; }
         public int TargetHeight { get; set; }
 
-        /// <summary>要求页面提供的交互能力；为 none 时不做交互检查（V009）。</summary>
-        public InteractionCapability RequiredInteraction { get; set; }
+        /// <summary>允许外部联网：开启时 V004 不再判定外链资源与网络请求为致命问题。</summary>
+        public bool AllowExternalNetwork { get; set; }
 
         public ValidationOptions()
         {
             OfflineRequired = true;
+            AllowExternalNetwork = false;
             MaxBytes = 5 * 1024 * 1024;
             PerformanceMode = PerformanceMode.balanced;
             TargetWidth = 1920;
@@ -33,7 +34,7 @@ namespace Lively.Models.Ai
     }
 
     /// <summary>
-    /// 单条校验问题，Code 对应 07 契约 §6.1 的 V001–V009。
+    /// 单条校验问题，Code 对应 07 契约 §6.1 的 V001–V008。
     /// </summary>
     public class ValidationIssue
     {

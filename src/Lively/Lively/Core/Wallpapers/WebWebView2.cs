@@ -61,7 +61,8 @@ namespace Lively.Core.Wallpapers
             AppTheme theme,
             int volume,
             double? scale = null,
-            string audioVisualizerId = null)
+            string audioVisualizerId = null,
+            bool allowExternalNetwork = false)
         {
             var filePath = ResolveFilePath(path, model);
             LivelyPropertyCopyPath = livelyPropertyPath;
@@ -81,6 +82,8 @@ namespace Lively.Core.Wallpapers
             cmdArgs.Append(!string.IsNullOrEmpty(audioVisualizerId) ? " --wallpaper-audio-id " + audioVisualizerId : " ");
             cmdArgs.Append(!string.IsNullOrWhiteSpace(debugPort) ? " --wallpaper-debug " + debugPort : " ");
             cmdArgs.Append(model.LivelyInfo.Type.IsOnlineWallpaper() ? " --wallpaper-type online" : " --wallpaper-type local");
+            // 本地 HTML 壁纸的运行时联网开关：关闭时 Player 会拦截页面的外部请求。
+            cmdArgs.Append(allowExternalNetwork ? " --wallpaper-allow-network true" : " --wallpaper-allow-network false");
             if (TryParseUserCommandArgs(model.LivelyInfo.Arguments, out string parsedArgs))
                 cmdArgs.Append(" " + parsedArgs);
 

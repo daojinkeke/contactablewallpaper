@@ -367,7 +367,7 @@ namespace Lively
                 if (!Services.GetRequiredService<IRunnerService>().IsVisibleUI)
                 {
                     Services.GetRequiredService<ISystray>().ShowBalloonNotification(4000,
-                        "Lively Wallpaper",
+                        "Contactable Wallpaper",
                         Lively.Properties.Resources.TextUpdateAvailable);
                 }
             }));

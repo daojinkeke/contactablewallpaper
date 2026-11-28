@@ -1,0 +1,1418 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#07100f" />
+  <title>雾谷</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #07100f;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    @keyframes appear {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    #scene {
+      position: fixed;
+      inset: 0;
+      /* 显式宽高：避免替换元素退回固有尺寸导致坐标错位 */
+      width: 100%;
+      height: 100%;
+      display: block;
+      /* 只淡入画布，页面本身始终不透明，避免宿主窗口闪白 */
+      animation: appear 1.5s ease .05s both;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      #scene { animation: none; }
+    }
+
+    .clockwrap {
+      position: fixed;
+      left: min(5.4vw, 56px);
+      bottom: min(5.2vh, 46px);
+      z-index: 4;
+      pointer-events: none;
+      transition: opacity 1.2s ease, transform 1.2s ease;
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .clockwrap.hidden {
+      opacity: 0;
+      transform: translateY(12px);
+    }
+
+    .clockwrap::before {
+      content: '';
+      position: absolute;
+      left: -16px;
+      top: 8px;
+      bottom: 8px;
+      width: 1px;
+      background: linear-gradient(180deg, rgba(228, 242, 236, 0), rgba(228, 242, 236, .38), rgba(228, 242, 236, 0));
+    }
+
+    .clock {
+      font-family: "Songti SC", "STSong", "SimSun", "Noto Serif CJK SC", serif;
+      font-size: clamp(42px, 4.8vw, 66px);
+      font-weight: 300;
+      line-height: 1;
+      letter-spacing: .02em;
+      font-variant-numeric: tabular-nums;
+      color: rgba(236, 244, 238, .93);
+      text-shadow: 0 0 30px rgba(222, 240, 232, .30);
+    }
+
+    .clock .sec {
+      font-size: .38em;
+      letter-spacing: .12em;
+      margin-left: .18em;
+      color: rgba(212, 232, 224, .55);
+    }
+
+    .date {
+      margin-top: 12px;
+      font-family: "Songti SC", "STSong", "SimSun", "Noto Serif CJK SC", serif;
+      font-size: 12px;
+      letter-spacing: .30em;
+      color: rgba(204, 224, 216, .55);
+      text-shadow: 0 1px 10px rgba(0, 0, 0, .35);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .clockwrap { transition: none; }
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="scene"></canvas>
+  <div class="clockwrap" id="clockwrap">
+    <div class="clock"><span id="clock-main">--:--</span><span class="sec" id="clock-sec">--</span></div>
+    <div class="date" id="clock-date"></div>
+  </div>
+  <script>
+    (function () {
+      'use strict';
+
+      var canvas = document.getElementById('scene');
+      var ctx = canvas.getContext('2d', { alpha: false });
+      var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+      var W = 0, H = 0, DPR = 1;
+      var HORIZON = 0.68;          // 水线（压低水面）
+      var nowMs = 0, clock = 0, dt = 0, lastTs = 0;
+      var elapsed = 0;
+
+      function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+      function rand(a, b) { return a + Math.random() * (b - a); }
+
+      function mulberry(seed) {
+        var s = seed >>> 0;
+        return function () {
+          s = (s + 0x6D2B79F5) | 0;
+          var t = Math.imul(s ^ (s >>> 15), 1 | s);
+          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+
+      /* =====================================================================
+       * 1. 宿主环境
+       * ===================================================================== */
+      var clockOffset = 0;
+      var clockReady = false;
+
+      var envState = {
+        hour: 12,
+        minute: 0,
+        isDay: true,
+        cond: 'clear',
+        code: 0,
+        temp: 15,
+        wind: 0,
+        humidity: 55,
+        cloud: 0.10,
+        light: 1,
+        warmth: 0,
+        weatherKnown: false
+      };
+
+      var CODE_MAP = {
+        0: 'clear', 1: 'partly', 2: 'partly', 3: 'cloudy',
+        45: 'fog', 48: 'fog',
+        51: 'drizzle', 53: 'drizzle', 55: 'drizzle', 56: 'drizzle', 57: 'drizzle',
+        61: 'rain', 63: 'rain', 65: 'rain', 66: 'rain', 67: 'rain',
+        71: 'snow', 73: 'snow', 75: 'snow', 77: 'snow',
+        80: 'rain', 81: 'rain', 82: 'rain', 85: 'snow', 86: 'snow',
+        95: 'thunder', 96: 'thunder', 99: 'thunder'
+      };
+
+      var CLOUD_BY_COND = {
+        clear: 0.04, partly: 0.42, cloudy: 0.80, fog: 0.62,
+        drizzle: 0.70, rain: 0.86, snow: 0.80, thunder: 0.94
+      };
+
+      function condFromWeather(w) {
+        if (!w) return null;
+        if (w.conditionCode !== undefined && CODE_MAP[w.conditionCode] !== undefined)
+          return CODE_MAP[w.conditionCode];
+        var c = String(w.condition || '').toLowerCase();
+        if (c.indexOf('thunder') >= 0) return 'thunder';
+        if (c.indexOf('snow') >= 0) return 'snow';
+        if (c.indexOf('rain') >= 0 || c.indexOf('drizzle') >= 0) return 'rain';
+        if (c.indexOf('fog') >= 0 || c.indexOf('mist') >= 0) return 'fog';
+        if (c.indexOf('cloud') >= 0 || c.indexOf('overcast') >= 0) return 'cloudy';
+        if (c.indexOf('clear') >= 0 || c.indexOf('sun') >= 0) return 'clear';
+        return null;
+      }
+
+      function applyEnv() {
+        var raw = (window.contactableEnv && typeof window.contactableEnv === 'object')
+          ? window.contactableEnv : null;
+        var t = raw && raw.time && typeof raw.time === 'object' ? raw.time : null;
+        var w = raw && raw.weather && typeof raw.weather === 'object' ? raw.weather : null;
+
+        if (!clockReady) {
+          clockReady = true;
+          if (t && t.iso) {
+            var d = new Date(t.iso);
+            if (!isNaN(d.getTime())) clockOffset = d.getTime() - Date.now();
+          }
+        }
+
+        var tz = (t && typeof t.timezoneOffsetMinutes === 'number')
+          ? t.timezoneOffsetMinutes : -new Date().getTimezoneOffset();
+        var local = new Date(Date.now() + clockOffset + tz * 60000);
+        envState.hour = local.getUTCHours() + local.getUTCMinutes() / 60;
+        envState.minute = local.getUTCMinutes();
+        envState.isDay = (t && typeof t.isDay === 'boolean')
+          ? t.isDay : (envState.hour >= 6 && envState.hour < 18);
+
+        if (w) {
+          var cond = condFromWeather(w);
+          envState.cond = cond || 'clear';
+          envState.code = w.conditionCode || 0;
+          if (typeof w.temperatureC === 'number') envState.temp = w.temperatureC;
+          if (typeof w.windKph === 'number') envState.wind = w.windKph;
+          if (typeof w.humidity === 'number') envState.humidity = w.humidity;
+          envState.weatherKnown = true;
+        } else {
+          envState.weatherKnown = false;
+          envState.cond = 'clear';
+          envState.code = 0;
+          envState.wind = 6;
+          envState.humidity = 52;
+        }
+
+        envState.cloud = CLOUD_BY_COND[envState.cond] || 0.06;
+
+        var sun = sunCurve(envState.hour);
+        envState.light = clamp(sun * (1 - envState.cloud * 0.42), 0.02, 1);
+        envState.warmth = sun > 0.02
+          ? (envState.hour < 9 || envState.hour > 16 ? 0.55 : 0.08)
+          : -0.28;
+
+        buildSky();
+      }
+
+      function sunCurve(h) {
+        var rise = 6.3, set = 18.7;
+        if (h < rise - 0.9 || h > set + 0.9) return 0.02;
+        var p = clamp((h - rise) / (set - rise), 0, 1);
+        return Math.pow(Math.sin(p * Math.PI), 0.85);
+      }
+
+      /* =====================================================================
+       * 2. 天色
+       * ===================================================================== */
+      var SKY_KEYS = [
+        [0.0, '#04090f', '#071522', '#0d2230', '#050c11'],
+        [4.8, '#050c14', '#0a1a28', '#132533', '#06101a'],
+        [6.2, '#243349', '#5b6079', '#c08a72', '#132029'],
+        [7.4, '#3a5a6e', '#78969b', '#e2c19a', '#1d3136'],
+        [11.0, '#4d87a0', '#8bbec6', '#e6f1e6', '#22424a'],
+        [15.5, '#4a83a0', '#86b4b8', '#e2ecd8', '#223f3f'],
+        [17.6, '#3b3a52', '#8a5f66', '#e6a172', '#1e2a31'],
+        [18.8, '#221f33', '#4a3d52', '#8e5f5f', '#101820'],
+        [20.2, '#080d16', '#0d1a28', '#182a35', '#060d13'],
+        [24.0, '#04090f', '#071522', '#0d2230', '#050c11']
+      ];
+
+      var sky = { top: '#04090f', mid: '#071522', horizon: '#0d2230', water: '#050c11' };
+
+      function hexToRgb(h) {
+        return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+      }
+      function rgbToHex(c) {
+        return '#' + c.map(function (v) {
+          var s = Math.round(clamp(v, 0, 255)).toString(16);
+          return s.length < 2 ? '0' + s : s;
+        }).join('');
+      }
+      function mixHex(a, b, t) {
+        var A = hexToRgb(a), B = hexToRgb(b);
+        return rgbToHex([
+          A[0] + (B[0] - A[0]) * t,
+          A[1] + (B[1] - A[1]) * t,
+          A[2] + (B[2] - A[2]) * t
+        ]);
+      }
+      function shade(hex, k) {
+        var c = hexToRgb(hex);
+        return rgbToHex([c[0] * k, c[1] * k, c[2] * k]);
+      }
+      function desaturate(hex, t, grey) {
+        var c = hexToRgb(hex);
+        var g = typeof grey === 'number' ? grey : (c[0] + c[1] + c[2]) / 3;
+        return rgbToHex([c[0] + (g - c[0]) * t, c[1] + (g - c[1]) * t, c[2] + (g - c[2]) * t]);
+      }
+      function hexA(hex, a) {
+        var c = hexToRgb(hex);
+        return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+      }
+
+      function buildSky() {
+        var h = envState.hour;
+        var i = 0;
+        while (i < SKY_KEYS.length - 2 && SKY_KEYS[i + 1][0] <= h) i++;
+        var a = SKY_KEYS[i], b = SKY_KEYS[i + 1];
+        var t = clamp((h - a[0]) / (b[0] - a[0] || 1), 0, 1);
+        t = t * t * (3 - 2 * t);
+
+        var top = mixHex(a[1], b[1], t);
+        var mid = mixHex(a[2], b[2], t);
+        var hor = mixHex(a[3], b[3], t);
+        var wat = mixHex(a[4], b[4], t);
+
+        var c = envState.cloud;
+        top = shade(desaturate(top, c * 0.55), 1 - c * 0.22);
+        mid = shade(desaturate(mid, c * 0.55), 1 - c * 0.18);
+        hor = shade(desaturate(hor, c * 0.45), 1 - c * 0.10);
+        if (envState.cond === 'fog' || envState.cond === 'snow') {
+          hor = desaturate(hor, 0.45, 190);
+        }
+        if (envState.cond === 'thunder') {
+          top = shade(top, 0.72);
+          mid = shade(mid, 0.78);
+        }
+
+        sky.top = top; sky.mid = mid; sky.horizon = hor; sky.water = shade(wat, 1 - c * 0.15);
+        ridgeTint = 0.30 + envState.light * 0.85;
+      }
+
+      /* =====================================================================
+       * 3. 场景数据
+       * ===================================================================== */
+      var ridgeTint = 1;
+      var stars = [];
+      var puffs = [];
+      var drops = [];
+      var shimmer = [];
+      var ripples = [];
+      var gusts = [];
+      var wisps = [];
+      var fogBands = [];
+      var birds = [];
+
+      // y/amp 都是视口比例；peak 控制尖峰；rough 控制起伏频率
+      var RIDGE_BANDS = [
+        { y: 0.352, amp: 0.046, rough: 0.86, phase: 0.0, depth: 0.16, k: 1.10, col: '#93b3a4', peak: 0.034, peakF: 2.4 },
+        { y: 0.392, amp: 0.054, rough: 1.12, phase: 1.7, depth: 0.26, k: 0.98, col: '#7b9d90', peak: 0.052, peakF: 3.1 },
+        { y: 0.432, amp: 0.062, rough: 1.46, phase: 3.1, depth: 0.38, k: 0.88, col: '#648b80', peak: 0.068, peakF: 2.1 },
+        { y: 0.474, amp: 0.064, rough: 1.85, phase: 4.4, depth: 0.52, k: 0.76, col: '#4d746e', peak: 0.058, peakF: 3.7 },
+        { y: 0.520, amp: 0.056, rough: 2.35, phase: 5.6, depth: 0.68, k: 0.64, col: '#3b5f5d', peak: 0.038, peakF: 4.4 },
+        { y: 0.566, amp: 0.044, rough: 3.10, phase: 6.9, depth: 0.86, k: 0.50, col: '#2c4a49', peak: 0.022, peakF: 5.2 }
+      ];
+
+      var pointer = { x: 0.5, y: 0.5, tx: 0.5, ty: 0.5, inside: false, down: false };
+      var par = { x: 0, y: 0 };
+
+      function buildScene() {
+        stars = [];
+        puffs = [];
+        drops = [];
+        shimmer = [];
+        wisps = [];
+        gusts = [];
+        ripples = [];
+        fogBands = [];
+        birds = [];
+
+        var starCount = clamp(Math.round(W * H / 9000), 60, 260);
+        for (var i = 0; i < starCount; i++) {
+          stars.push({
+            x: Math.random(),
+            y: Math.random() * HORIZON * 0.92,
+            r: rand(0.5, 1.5),
+            b: rand(0.25, 0.9),
+            tw: rand(0.4, 1.8),
+            ph: rand(0, 6.28)
+          });
+        }
+
+        for (var p = 0; p < 22; p++) {
+          puffs.push({
+            x: Math.random(),
+            y: rand(0.34, 0.82),
+            s: rand(0.30, 0.82),
+            v: rand(0.004, 0.013) * (Math.random() < 0.5 ? -1 : 1),
+            a: rand(0.12, 0.30),
+            d: rand(0.35, 1.0),
+            px: 0, py: 0, pvx: 0, pvy: 0
+          });
+        }
+
+        for (var w = 0; w < 10; w++) {
+          wisps.push({
+            x: Math.random(), y: rand(0.05, 0.36),
+            s: rand(0.35, 0.95), v: rand(0.002, 0.006),
+            a: rand(0.05, 0.14), d: rand(0.1, 0.35)
+          });
+        }
+
+        // 层间雾带：贴着山脊缓慢横向漂移
+        for (var f = 0; f < 7; f++) {
+          var band = RIDGE_BANDS[Math.min(f + 1, RIDGE_BANDS.length - 1)];
+          fogBands.push({
+            y: band.y + rand(0.010, 0.030),
+            s: rand(0.45, 0.95),
+            v: rand(0.002, 0.006) * (Math.random() < 0.5 ? -1 : 1),
+            x: Math.random(),
+            a: rand(0.10, 0.22),
+            d: band.depth
+          });
+        }
+
+        for (var s = 0; s < 240; s++) {
+          shimmer.push({
+            x: Math.random(),
+            y: HORIZON + Math.random() * (1 - HORIZON),
+            len: rand(0.010, 0.090),
+            a: rand(0.08, 0.44),
+            ph: rand(0, 6.28),
+            sp: rand(0.6, 1.7)
+          });
+        }
+
+        for (var b2 = 0; b2 < 5; b2++) {
+          birds.push({
+            x: Math.random(), y: rand(0.16, 0.40),
+            v: rand(0.004, 0.012),
+            s: rand(0.7, 1.6),
+            ph: rand(0, 6.28),
+            a: 0
+          });
+        }
+
+        buildPrecipitation();
+      }
+
+      function buildPrecipitation() {
+        drops = [];
+        var rainN = clamp(Math.round(W * H / 11000), 90, 420);
+        for (var i = 0; i < rainN; i++) {
+          drops.push({
+            x: Math.random(), y: Math.random(),
+            v: rand(0.55, 1.25),
+            l: rand(0.012, 0.045),
+            a: rand(0.10, 0.40),
+            d: rand(0.3, 1.0)
+          });
+        }
+      }
+
+      /* =====================================================================
+       * 4. 尺寸
+       * ===================================================================== */
+      var resizeTimer = 0;
+      function resize() {
+        DPR = Math.min(window.devicePixelRatio || 1, 2);
+        var cssW = window.innerWidth, cssH = window.innerHeight;
+        canvas.width = Math.max(1, Math.round(cssW * DPR));
+        canvas.height = Math.max(1, Math.round(cssH * DPR));
+        W = canvas.width;
+        H = canvas.height;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        buildScene();
+      }
+
+      /* =====================================================================
+       * 5. 绘制
+       * ===================================================================== */
+      function drawSky(time) {
+        var g = ctx.createLinearGradient(0, 0, 0, H * HORIZON);
+        g.addColorStop(0, sky.top);
+        g.addColorStop(0.52, sky.mid);
+        g.addColorStop(1, sky.horizon);
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+      }
+
+      function sunPos() {
+        var h = envState.hour;
+        var p = clamp((h - 6.3) / 12.4, 0, 1);
+        var isNight = envState.light < 0.12;
+        if (isNight) return { x: 0.70, y: 0.17, p: 0, night: true };
+        return {
+          x: 0.14 + p * 0.72,
+          y: 0.30 - Math.sin(p * Math.PI) * 0.13,
+          p: p,
+          night: false
+        };
+      }
+
+      function drawStars(time) {
+        var vis = clamp(1 - envState.light * 2.2, 0, 1) * (1 - envState.cloud * 0.85);
+        if (vis <= 0.02) return;
+        for (var i = 0; i < stars.length; i++) {
+          var s = stars[i];
+          var tw = 0.55 + 0.45 * Math.sin(time * s.tw + s.ph);
+          var a = s.b * tw * vis;
+          if (a < 0.02) continue;
+          var x = s.x * W + par.x * 6;
+          var y = s.y * H + par.y * 4;
+          ctx.fillStyle = 'rgba(226,240,255,' + a.toFixed(3) + ')';
+          ctx.beginPath();
+          ctx.arc(x, y, s.r * DPR, 0, 6.283);
+          ctx.fill();
+        }
+      }
+
+      function drawSun(time) {
+        var pos = sunPos();
+        var x = pos.x * W + par.x * 14;
+        var y = pos.y * H + par.y * 8;
+        var night = pos.night;
+        var radius = (night ? 0.016 : 0.026) * Math.min(W, H);
+        var core = night ? 'rgba(232,240,250,1)' : 'rgba(255,250,232,1)';
+        var haloC = night ? 'rgba(150,186,214,' : 'rgba(255,206,150,';
+        var halo = radius * (night ? 5.4 : 6.4);
+        var strength = clamp(0.45 + envState.light * 0.55, 0.22, 0.95) * (1 - envState.cloud * 0.45);
+
+        var hg = ctx.createRadialGradient(x, y, radius * 0.4, x, y, halo);
+        hg.addColorStop(0, haloC + (0.42 * strength).toFixed(3) + ')');
+        hg.addColorStop(0.42, haloC + (0.14 * strength).toFixed(3) + ')');
+        hg.addColorStop(1, haloC + '0)');
+        ctx.fillStyle = hg;
+        ctx.beginPath();
+        ctx.arc(x, y, halo, 0, 6.283);
+        ctx.fill();
+
+        var cg = ctx.createRadialGradient(x, y, 0, x, y, radius);
+        cg.addColorStop(0, core);
+        cg.addColorStop(0.62, night ? 'rgba(226,238,250,0.92)' : 'rgba(255,244,218,0.94)');
+        cg.addColorStop(1, night ? 'rgba(200,220,240,0)' : 'rgba(255,236,200,0)');
+        ctx.fillStyle = cg;
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, 6.283);
+        ctx.fill();
+      }
+
+      function drawWisps(time) {
+        var dts = dt / 1000;
+        var density = clamp(0.18 + envState.cloud * 1.25, 0.1, 1.25);
+        for (var i = 0; i < wisps.length; i++) {
+          var w = wisps[i];
+          w.x += w.v * dts * 0.55;
+          if (w.x > 1.3) w.x = -0.3;
+          var x = w.x * W + par.x * 18 * w.d;
+          var y = w.y * H + par.y * 8 * w.d;
+          var rx = w.s * W * 0.34;
+          var ry = w.s * H * 0.055;
+          var a = w.a * density;
+          if (a <= 0.003) continue;
+          var g = ctx.createRadialGradient(x, y, 0, x, y, rx);
+          g.addColorStop(0, 'rgba(226,236,232,' + a.toFixed(3) + ')');
+          g.addColorStop(1, 'rgba(226,236,232,0)');
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.scale(1, ry / rx);
+          ctx.translate(-x, -y);
+          ctx.fillStyle = g;
+          ctx.beginPath();
+          ctx.arc(x, y, rx, 0, 6.283);
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+
+      function drawBirds(time) {
+        var dts = dt / 1000;
+        var vis = clamp(0.25 + envState.light * 0.9, 0.1, 1) * (1 - envState.cloud * 0.6);
+        if (vis < 0.08) return;
+        ctx.save();
+        ctx.strokeStyle = 'rgba(28,40,44,' + (0.45 * vis).toFixed(3) + ')';
+        ctx.lineWidth = Math.max(1, 1.2 * DPR);
+        ctx.lineCap = 'round';
+        var mx = pointer.x * W, my = pointer.y * H;
+        var scare = Math.min(W, H) * 0.16;
+        for (var i = 0; i < birds.length; i++) {
+          var b = birds[i];
+          b.fx = b.fx || 0;
+          b.fy = b.fy || 0;
+          b.a = b.a == null ? 0 : b.a;
+
+          // 从山脊后浮现：先上升，再淡入
+          if (b.emerge > 0) {
+            b.emerge -= dts;
+            b.y -= 0.06 * dts;
+            b.a = Math.min(1, b.a + dts * 1.5);
+          } else {
+            b.a = Math.min(1, b.a + dts * 0.6);
+          }
+
+          if (pointer.inside) {
+            var bx2 = b.x * W + par.x * 34;
+            var by2 = b.y * H + par.y * 14;
+            var dx = bx2 - mx, dy = by2 - my;
+            var dd = Math.sqrt(dx * dx + dy * dy);
+            if (dd < scare) {
+              var k = 1 - dd / scare;
+              b.fx = (dx / (dd || 1)) * 1.2 * (0.4 + k);
+              b.fy = -0.42 * (0.4 + k);
+              b.scared = 1;
+            }
+          }
+
+          b.x += (b.v + b.fx) * dts;
+          b.y += b.fy * dts;
+          b.fx *= Math.pow(0.25, dts);
+          b.fy *= Math.pow(0.45, dts);
+          b.y = clamp(b.y, 0.06, 0.55);
+
+          if (b.scared) {
+            if (b.a == null) b.a = 1;
+            if (b.x < -0.25 || b.x > 1.25 || b.y < -0.2) {
+              birds.splice(i, 1);
+              i--;
+              continue;
+            }
+          } else if (b.x > 1.1) {
+            b.x = -0.1;
+            b.a = 0;
+          } else if (b.x < -0.15) {
+            b.x = 1.05;
+            b.a = 0;
+          }
+
+          var edge = 1;
+          if (!b.scared) {
+            if (b.x > 0.9) edge = clamp((1.1 - b.x) / 0.2, 0, 1);
+            else if (b.x < 0.02) edge = clamp((b.x + 0.1) / 0.12, 0, 1);
+          }
+
+          var x = b.x * W + par.x * 34;
+          var y = b.y * H + par.y * 14;
+          var s = b.s * Math.min(W, H) * 0.008;
+          var panic = Math.min(1, Math.abs(b.fx) * 3 + Math.abs(b.fy) * 3);
+          var flap = Math.sin(time * (3.4 + panic * 8) + b.ph) * 0.5 + 0.5;
+
+          ctx.strokeStyle = 'rgba(28,40,44,' + (0.45 * vis * b.a * edge).toFixed(3) + ')';
+          ctx.beginPath();
+          ctx.beginPath();
+          ctx.moveTo(x - s, y + s * (0.25 + flap * 0.5));
+          ctx.quadraticCurveTo(x - s * 0.3, y - s * (0.35 + flap * 0.4), x, y);
+          ctx.quadraticCurveTo(x + s * 0.3, y - s * (0.35 + flap * 0.4), x + s, y + s * (0.25 + flap * 0.5));
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      function ridgeY(band, u, time) {
+        var v = u * band.rough * 6.283 + band.phase;
+        var broad = Math.sin(v + time * 0.05) * 0.52
+          + Math.sin(v * 0.57 + 1.3 + time * 0.03) * 0.30;
+        var detail = Math.sin(v * 2.3 + time * 0.09) * 0.15
+          + Math.sin(v * 5.1 - time * 0.13) * 0.08
+          + Math.sin(v * 9.7 + time * 0.18) * 0.045;
+        var peak = Math.pow(0.5 + 0.5 * Math.sin(u * band.peakF * 6.283 + band.phase * 1.7), 2.6);
+        return (band.y - band.peak * peak * 0.5) * H
+          + (broad + detail) * band.amp * H;
+      }
+
+      function ridgePath(band, time, from, to, samples) {
+        var shift = par.x * 44 * band.depth + Math.sin(time * 0.05 + band.phase) * W * 0.004;
+        ctx.beginPath();
+        for (var i = 0; i <= samples; i++) {
+          var u = from + (i / samples) * (to - from);
+          var x = u * W;
+          var y = ridgeY(band, u, time);
+          if (i === 0) ctx.moveTo(x + shift, y);
+          else ctx.lineTo(x + shift, y);
+        }
+      }
+
+      function drawRidgeFill(band, time, idx) {
+        var lit = 0.30 + envState.light * 1.05;
+        var k = clamp(lit * band.k, 0.07, 1.35);
+        var col = shade(band.col, k);
+        var haze = clamp(0.52 - idx * 0.10 - envState.light * 0.14, 0, 0.6);
+        col = mixHex(col, sky.horizon, haze * (0.35 + envState.cloud * 0.3));
+        if (envState.cond === 'fog') col = mixHex(col, sky.horizon, 0.18);
+
+        var samples = 120;
+        var shift = par.x * 44 * band.depth + Math.sin(time * 0.05 + band.phase) * W * 0.004;
+
+        ridgePath(band, time, -0.05, 1.06, samples);
+        var bottom = H * 1.06;
+        ctx.lineTo((1.06 * W) + shift, bottom);
+        ctx.lineTo((-0.05 * W) + shift, bottom);
+        ctx.closePath();
+
+        var topY = (band.y - band.amp) * H;
+        var g = ctx.createLinearGradient(0, topY, 0, bottom);
+        g.addColorStop(0, mixHex(col, '#ffffff', 0.10));
+        g.addColorStop(0.35, col);
+        g.addColorStop(1, shade(col, 0.62));
+        ctx.fillStyle = g;
+        ctx.fill();
+
+        // 受光边：靠近太阳的一侧更亮
+        var pos = sunPos();
+        var towardSun = pos.night ? 0.5 : clamp(pos.x, 0.05, 0.95);
+        var rimA = clamp(0.05 + envState.light * 0.16 - idx * 0.012, 0.02, 0.22);
+        ridgePath(band, time, -0.05, 1.06, samples);
+        var rg = ctx.createLinearGradient(0, 0, W, 0);
+        var cS = Math.max(0.001, towardSun - 0.35), cE = Math.min(0.999, towardSun + 0.35);
+        rg.addColorStop(Math.max(0, cS - 0.2), 'rgba(232,248,240,0)');
+        rg.addColorStop(towardSun, 'rgba(236,250,242,' + rimA.toFixed(3) + ')');
+        rg.addColorStop(Math.min(1, cE + 0.2), 'rgba(232,248,240,0)');
+        ctx.strokeStyle = rg;
+        ctx.lineWidth = Math.max(1, (1.0 + idx * 0.15) * DPR);
+        ctx.stroke();
+
+        // 山脊光扫：点击后沿轮廓向两侧传播的亮段
+        for (var wi = 0; wi < ridgeWaves.length; wi++) {
+          var wv = ridgeWaves[wi];
+          var fade = Math.max(0, 1 - wv.t / 2.4);
+          if (fade <= 0) continue;
+          var offs = [-wv.t * 0.42, wv.t * 0.42];
+          for (var oi = 0; oi < 2; oi++) {
+            var uw = wv.u + offs[oi];
+            if (uw < 0.005 || uw > 0.995) continue;
+            ctx.beginPath();
+            for (var sk2 = 0; sk2 <= 10; sk2++) {
+              var us = uw - 0.018 + 0.036 * (sk2 / 10);
+              var sx2 = us * W + shift;
+              var sy2 = ridgeY(band, us, time);
+              if (sk2 === 0) ctx.moveTo(sx2, sy2); else ctx.lineTo(sx2, sy2);
+            }
+            ctx.strokeStyle = 'rgba(214,248,240,' + (fade * 0.16).toFixed(3) + ')';
+            ctx.lineWidth = 6;
+            ctx.stroke();
+            ctx.strokeStyle = 'rgba(236,254,250,' + (fade * 0.8).toFixed(3) + ')';
+            ctx.lineWidth = Math.max(1.2, 1.6 * DPR);
+            ctx.stroke();
+          }
+        }
+      }
+
+      function drawFogBands(time) {
+        var dts = dt / 1000;
+        var base = 0.10 + envState.cloud * 0.18 + (1 - envState.light) * 0.10
+          + clamp((envState.humidity - 55) / 240, 0, 0.20);
+        if (envState.cond === 'fog') base += 0.34;
+        base = clamp(base, 0.06, 0.85);
+
+        for (var i = 0; i < fogBands.length; i++) {
+          var f = fogBands[i];
+          f.x += f.v * dts;
+          if (f.x > 1.4) f.x = -0.4;
+          if (f.x < -0.4) f.x = 1.4;
+          var x = f.x * W + par.x * 30 * f.d;
+          var y = f.y * H + par.y * 8 * f.d;
+          var rx = f.s * W * 0.42;
+          var ry = f.s * H * 0.035;
+          var a = f.a * base * fogScale;
+          if (a <= 0.004) continue;
+          var g = ctx.createRadialGradient(x, y, 0, x, y, rx);
+          g.addColorStop(0, 'rgba(220,238,232,' + a.toFixed(3) + ')');
+          g.addColorStop(0.6, 'rgba(210,230,224,' + (a * 0.4).toFixed(3) + ')');
+          g.addColorStop(1, 'rgba(200,222,216,0)');
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.scale(1, ry / rx);
+          ctx.translate(-x, -y);
+          ctx.fillStyle = g;
+          ctx.beginPath();
+          ctx.arc(x, y, rx, 0, 6.283);
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+
+      function shoreYAt(u) {
+        return (HORIZON + 0.0025 * Math.sin(u * 6.1 + 1.4)
+          + 0.0070 * Math.sin(u * 15.3 + 3.1)
+          + 0.0045 * Math.sin(u * 2.7 + 0.6)) * H;
+      }
+
+      function drawWater(time) {
+        var y0 = H * HORIZON;
+
+        // 水岸线跟着山脊起伏，避免一整条平直分界
+        ctx.save();
+        ctx.beginPath();
+        for (var sEdge = 0; sEdge <= 120; sEdge++) {
+          var ue = sEdge / 120;
+          var sye = shoreYAt(ue);
+          if (sEdge === 0) ctx.moveTo(-2, sye);
+          else ctx.lineTo(ue * W, sye);
+        }
+        ctx.lineTo(W + 2, H + 2);
+        ctx.lineTo(-2, H + 2);
+        ctx.closePath();
+        ctx.clip();
+
+        var g = ctx.createLinearGradient(0, y0, 0, H);
+        g.addColorStop(0, shade(sky.water, 1.0));
+        g.addColorStop(0.5, shade(sky.water, 0.58));
+        g.addColorStop(1, shade(sky.water, 0.22));
+        ctx.fillStyle = g;
+        ctx.fillRect(0, y0 - H * 0.02, W, H - y0 + H * 0.02);
+
+        // 山体倒影：镜像后用水色渐隐
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, y0, W, H - y0);
+        ctx.clip();
+        for (var i = RIDGE_BANDS.length - 1; i >= 0; i--) {
+          var band = RIDGE_BANDS[i];
+          var col = mixHex(shade(band.col, 0.6), sky.water, 0.35);
+          ctx.save();
+          ctx.translate(0, y0 * 2);
+          ctx.scale(1, -1);
+          ridgePath(band, time, -0.05, 1.06, 72);
+          ctx.lineTo((1.06 * W), y0 + 2);
+          ctx.lineTo((-0.05 * W), y0 + 2);
+          ctx.closePath();
+          ctx.fillStyle = hexA(col, 0.16 + (RIDGE_BANDS.length - i) * 0.012);
+          ctx.fill();
+          ctx.restore();
+        }
+        // 倒影随距离衰减
+        var fade = ctx.createLinearGradient(0, y0, 0, H);
+        fade.addColorStop(0, hexA(sky.water, 0.10));
+        fade.addColorStop(0.4, hexA(sky.water, 0.55));
+        fade.addColorStop(1, hexA(sky.water, 0.96));
+        ctx.fillStyle = fade;
+        ctx.fillRect(0, y0, W, H - y0);
+        ctx.restore();
+
+        // 水线薄雾
+        var mgTop = y0 - H * 0.07, mgH = H * 0.20;
+        var mg = ctx.createLinearGradient(0, mgTop, 0, mgTop + mgH);
+        var mist = clamp(0.07 + envState.cloud * 0.10 + (1 - envState.light) * 0.05, 0.05, 0.20);
+        mg.addColorStop(0, 'rgba(226,240,236,0)');
+        mg.addColorStop(0.34, 'rgba(226,240,236,' + (mist * 0.75).toFixed(4) + ')');
+        mg.addColorStop(0.5, 'rgba(226,240,236,' + mist.toFixed(4) + ')');
+        mg.addColorStop(0.68, 'rgba(226,240,236,' + (mist * 0.5).toFixed(4) + ')');
+        mg.addColorStop(1, 'rgba(226,240,236,0)');
+        ctx.fillStyle = mg;
+        ctx.fillRect(0, mgTop, W, mgH);
+
+        // 天体倒影
+        var pos = sunPos();
+        var sx = pos.x * W + par.x * 10;
+        var warm = sunCol();
+        var refA = clamp(0.20 + envState.light * 0.34, 0.08, 0.55) * (1 - envState.cloud * 0.55);
+        var segs = 34;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (var k = 0; k < segs; k++) {
+          var f = k / segs;
+          var yy = y0 + (H - y0) * Math.pow(f, 1.12);
+          var wd = W * (0.026 + f * 0.10) * (0.72 + 0.30 * Math.sin(time * 1.5 + k * 1.3));
+          var wob = Math.sin(time * 0.85 + k * 0.8) * W * 0.004;
+          var a = refA * (1 - f) * (0.55 + 0.45 * Math.sin(time * 2.0 + k * 1.7));
+          if (a <= 0.004) continue;
+          var gg = ctx.createLinearGradient(sx - wd + wob, 0, sx + wd + wob, 0);
+          gg.addColorStop(0, warm.replace('ALPHA', '0'));
+          gg.addColorStop(0.5, warm.replace('ALPHA', clamp(a, 0, 0.8).toFixed(3)));
+          gg.addColorStop(1, warm.replace('ALPHA', '0'));
+          ctx.fillStyle = gg;
+          ctx.fillRect(sx - wd + wob, yy, wd * 2, Math.max(2, (H - y0) / segs * 1.6));
+        }
+        ctx.restore();
+
+        // 水面碎光
+        var shimmerA = clamp(0.25 + (1 - envState.light) * 0.75, 0.2, 1) * (1 - envState.cloud * 0.35);
+        ctx.save();
+        ctx.lineCap = 'round';
+        for (var i = 0; i < shimmer.length; i++) {
+          var s = shimmer[i];
+          var b = Math.sin(time * s.sp + s.ph);
+          if (b <= 0) continue;
+          var yy2 = s.y * H;
+          var depthK = (yy2 - y0) / (H - y0);
+          var len = s.len * W * (0.35 + depthK * 1.7) * b;
+          var xx = s.x * W + par.x * (12 + depthK * 40) + Math.sin(time * 0.6 + s.ph) * 3;
+          var a2 = s.a * b * shimmerA * (0.35 + depthK * 0.9);
+          ctx.strokeStyle = 'rgba(212,240,236,' + clamp(a2, 0, 0.55).toFixed(3) + ')';
+          ctx.lineWidth = Math.max(1, 1.1 * DPR);
+          ctx.beginPath();
+          ctx.moveTo(xx - len / 2, yy2);
+          ctx.lineTo(xx + len / 2, yy2);
+          ctx.stroke();
+        }
+        ctx.restore();
+
+        // 贴水流动的雾絮
+        for (var p = 0; p < puffs.length; p++) {
+          var pf = puffs[p];
+          if (pf.y < HORIZON - 0.02) continue;
+          var px2 = pf.x * W + pf.px + par.x * 30 * pf.d;
+          var py2 = pf.y * H + pf.py + par.y * 12 * pf.d;
+          var rx2 = pf.s * W * 0.26;
+          var ry2 = pf.s * H * 0.045;
+          var pa = pf.a * (0.25 + envState.cloud * 0.5) * 0.6;
+          if (pa <= 0.004) continue;
+          var pg = ctx.createRadialGradient(px2, py2, 0, px2, py2, rx2);
+          pg.addColorStop(0, 'rgba(220,236,232,' + pa.toFixed(3) + ')');
+          pg.addColorStop(1, 'rgba(214,232,228,0)');
+          ctx.save();
+          ctx.translate(px2, py2);
+          ctx.scale(1, ry2 / rx2);
+          ctx.translate(-px2, -py2);
+          ctx.fillStyle = pg;
+          ctx.beginPath();
+          ctx.arc(px2, py2, rx2, 0, 6.283);
+          ctx.fill();
+          ctx.restore();
+        }
+
+        // 近景细浪：越靠近画面底部越粗，填满下方空水面
+        ctx.save();
+        for (var k = 0; k < 30; k++) {
+          var fk = k / 30;
+          var yk = y0 + (H - y0) * Math.pow(fk, 1.32) + Math.sin(time * 0.7 + k) * H * 0.004;
+          var lenK = W * (0.10 + fk * 0.55) * (0.45 + 0.55 * Math.sin(time * 0.85 + k * 1.9));
+          var cxk = W * (0.5 + 0.34 * Math.sin(k * 2.1 + time * 0.18));
+          var ak = (0.11 - fk * 0.05) * (0.45 + 0.55 * Math.sin(time * 1.25 + k * 1.3));
+          if (ak <= 0.003) continue;
+          var lk = ctx.createLinearGradient(cxk - lenK / 2, 0, cxk + lenK / 2, 0);
+          lk.addColorStop(0, 'rgba(206,236,232,0)');
+          lk.addColorStop(0.5, 'rgba(206,236,232,' + ak.toFixed(3) + ')');
+          lk.addColorStop(1, 'rgba(206,236,232,0)');
+          ctx.fillStyle = lk;
+          ctx.fillRect(cxk - lenK / 2, yk, lenK, Math.max(1, (0.8 + fk * 2.0) * DPR));
+        }
+        ctx.restore();
+
+        // 底部压暗收边
+        var btm = ctx.createLinearGradient(0, H * 0.70, 0, H);
+        btm.addColorStop(0, 'rgba(2,8,10,0)');
+        btm.addColorStop(0.65, 'rgba(2,8,10,0.20)');
+        btm.addColorStop(1, 'rgba(2,8,10,0.62)');
+        ctx.fillStyle = btm;
+        ctx.fillRect(0, H * 0.70, W, H * 0.30);
+
+        ctx.restore();
+      }
+
+      function sunCol() {
+        var night = envState.light < 0.12;
+        return night ? 'rgba(206,226,246,ALPHA)' : 'rgba(255,214,166,ALPHA)';
+      }
+
+      function drawFog(time) {
+        var dts = dt / 1000;
+        var damp = Math.pow(0.42, dts);
+        var spring = Math.pow(0.60, dts);
+        var base = 0.10 + envState.cloud * 0.16 + (1 - envState.light) * 0.12
+          + clamp((envState.humidity - 55) / 220, 0, 0.22);
+        if (envState.cond === 'fog') base += 0.34;
+        if (envState.cond === 'rain' || envState.cond === 'thunder') base += 0.06;
+        base = clamp(base, 0.06, 0.82);
+
+        for (var i = 0; i < puffs.length; i++) {
+          var p = puffs[i];
+          p.x += p.v * dts * 0.8;
+          if (p.x > 1.35) p.x = -0.35;
+
+          p.px += p.pvx * dts;
+          p.py += p.pvy * dts;
+          p.pvx *= damp;
+          p.pvy *= damp;
+          p.px *= spring;
+          p.py *= spring;
+
+          var x = p.x * W + p.px + par.x * 34 * p.d;
+          var y = p.y * H + p.py + par.y * 14 * p.d;
+          var rx = p.s * W * 0.30;
+          var ry = p.s * H * 0.10;
+          var a = p.a * base * fogScale;
+          if (a <= 0.004) continue;
+          var g = ctx.createRadialGradient(x, y, 0, x, y, rx);
+          g.addColorStop(0, 'rgba(214,232,226,' + a.toFixed(3) + ')');
+          g.addColorStop(0.55, 'rgba(206,226,220,' + (a * 0.45).toFixed(3) + ')');
+          g.addColorStop(1, 'rgba(200,220,215,0)');
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.scale(1, ry / rx);
+          ctx.translate(-x, -y);
+          ctx.fillStyle = g;
+          ctx.beginPath();
+          ctx.arc(x, y, rx, 0, 6.283);
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+
+      function precipVisible() {
+        var c = envState.cond;
+        return c === 'rain' || c === 'drizzle' || c === 'snow' || c === 'thunder';
+      }
+
+      function drawPrecip(time) {
+        if (!precipVisible()) return;
+        var dts = dt / 1000;
+        var snow = envState.cond === 'snow';
+        var heavy = envState.cond === 'thunder' ? 1.55 : (envState.cond === 'drizzle' ? 0.55 : 1);
+        var windAngle = clamp(envState.wind * 0.9 + dragWind * 16, 0, 45) * (snow ? 0.35 : 1);
+        var rad = windAngle * Math.PI / 180;
+        var dx = Math.sin(rad), dy = Math.cos(rad);
+        var count = Math.round(drops.length * clamp(heavy, 0.25, 1));
+
+        ctx.save();
+        if (snow) {
+          for (var i = 0; i < count; i++) {
+            var s = drops[i];
+            s.y += (0.045 + s.v * 0.075) * dts;
+            s.x += (0.010 + windAngle * 0.0012) * dts + Math.sin(time * 0.7 + i) * 0.010 * dts;
+            if (s.y > 1.02) { s.y = -0.04; s.x = Math.random(); }
+            if (s.x > 1.02) s.x -= 1.04;
+            var sx = s.x * W + par.x * 20 * s.d;
+            var sy = s.y * H + par.y * 10 * s.d;
+            var r = (0.9 + s.d * 1.6) * DPR;
+            var a = s.a * 1.5;
+            ctx.fillStyle = 'rgba(238,247,255,' + clamp(a, 0, 0.85).toFixed(3) + ')';
+            ctx.beginPath();
+            ctx.arc(sx, sy, r, 0, 6.283);
+            ctx.fill();
+          }
+        } else {
+          ctx.lineCap = 'round';
+          for (var j = 0; j < count; j++) {
+            var d = drops[j];
+            d.y += (0.55 + d.v * 0.85) * dts;
+            d.x += dx * (0.10 + d.v * 0.22) * dts;
+            if (d.y > 1.02) { d.y = -0.04; d.x = Math.random(); }
+            if (d.x > 1.04) d.x -= 1.08;
+            var px = d.x * W + par.x * 22 * d.d;
+            var py = d.y * H + par.y * 12 * d.d;
+            var len = d.l * H * (0.5 + d.d);
+            ctx.strokeStyle = 'rgba(190,220,232,' + clamp(d.a * heavy, 0, 0.6).toFixed(3) + ')';
+            ctx.lineWidth = Math.max(1, 1.0 * DPR);
+            ctx.beginPath();
+            ctx.moveTo(px, py);
+            ctx.lineTo(px - dx * len, py - dy * len);
+            ctx.stroke();
+          }
+        }
+        ctx.restore();
+      }
+
+      function drawGusts(time) {
+        for (var i = gusts.length - 1; i >= 0; i--) {
+          var g = gusts[i];
+          g.t += dt;
+          var p = g.t / g.life;
+          if (p >= 1) { gusts.splice(i, 1); continue; }
+          var r = g.r0 + (g.rmax - g.r0) * Math.pow(p, 0.62);
+          var a = (1 - p) * 0.34;
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          var grad = ctx.createRadialGradient(g.x, g.y, r * 0.55, g.x, g.y, r);
+          grad.addColorStop(0, 'rgba(220,240,236,0)');
+          grad.addColorStop(0.72, 'rgba(224,244,240,' + (a * 0.55).toFixed(3) + ')');
+          grad.addColorStop(1, 'rgba(224,244,240,0)');
+          ctx.fillStyle = grad;
+          ctx.beginPath();
+          ctx.arc(g.x, g.y, r, 0, 6.283);
+          ctx.fill();
+          ctx.restore();
+
+          // 环形气浪
+          ctx.save();
+          ctx.strokeStyle = 'rgba(228,246,242,' + (a * 0.5).toFixed(3) + ')';
+          ctx.lineWidth = Math.max(1, (2.0 - p * 1.4) * DPR);
+          ctx.beginPath();
+          ctx.arc(g.x, g.y, r * 0.92, 0, 6.283);
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+
+      function drawRipples() {
+        var y0 = H * HORIZON;
+        for (var i = ripples.length - 1; i >= 0; i--) {
+          var r = ripples[i];
+          r.t += dt;
+          var p = r.t / r.life;
+          if (p >= 1) { ripples.splice(i, 1); continue; }
+          var rad = r.r0 + (r.rmax - r.r0) * Math.pow(p, 0.8);
+          var squash = 0.30 + ((r.y - y0) / Math.max(1, H - y0)) * 0.55;
+          var a = (1 - p) * 0.42;
+          ctx.save();
+          ctx.translate(r.x, r.y);
+          ctx.scale(1, squash);
+          ctx.strokeStyle = 'rgba(226,246,240,' + a.toFixed(3) + ')';
+          ctx.lineWidth = Math.max(1, (1.8 - p * 1.2) * DPR);
+          ctx.beginPath();
+          ctx.arc(0, 0, rad, 0, 6.283);
+          ctx.stroke();
+          if (p < 0.6) {
+            ctx.strokeStyle = 'rgba(226,246,240,' + (a * 0.5).toFixed(3) + ')';
+            ctx.lineWidth = Math.max(1, 1 * DPR);
+            ctx.beginPath();
+            ctx.arc(0, 0, rad * 0.62, 0, 6.283);
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
+      }
+
+      function drawVignette() {
+        var g = ctx.createRadialGradient(W / 2, H * 0.52, Math.min(W, H) * 0.28, W / 2, H * 0.52, Math.max(W, H) * 0.78);
+        var k = 0.52 + (1 - envState.light) * 0.22;
+        g.addColorStop(0, 'rgba(0,0,0,0)');
+        g.addColorStop(0.62, 'rgba(2,8,10,' + (k * 0.30).toFixed(3) + ')');
+        g.addColorStop(1, 'rgba(2,8,10,' + k.toFixed(3) + ')');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+      }
+
+      /* =====================================================================
+       * 6. 交互
+       * ===================================================================== */
+      var fogScale = 1, dragWind = 0, lastWake = 0, lastPx = 0, lastPy = 0;
+      var ridgeWaves = [], splashes = [];
+      var lastHoverWake = 0;
+
+      function toCanvas(e) {
+        var rect = canvas.getBoundingClientRect();
+        return {
+          x: (e.clientX - rect.left) / Math.max(1, rect.width) * W,
+          y: (e.clientY - rect.top) / Math.max(1, rect.height) * H
+        };
+      }
+
+      function pushFog(x, y, power) {
+        for (var i = 0; i < puffs.length; i++) {
+          var p = puffs[i];
+          var px = p.x * W + p.px, py = p.y * H + p.py;
+          var dx = px - x, dy = py - y;
+          var dist = Math.sqrt(dx * dx + dy * dy);
+          var reach = Math.min(W, H) * 0.42;
+          if (dist > reach || dist < 0.001) continue;
+          var f = (1 - dist / reach) * power;
+          p.pvx += (dx / dist) * f * 150;
+          p.pvy += (dy / dist) * f * 70;
+        }
+      }
+
+      function pulse(cx, cy) {
+        var y0 = H * HORIZON;
+
+        if (cy < y0) {
+          // 陆地：山脊光扫 + 惊起一只飞鸟
+          ridgeWaves.push({ u: clamp(cx / W, 0.02, 0.98), t: 0 });
+          if (ridgeWaves.length > 3) ridgeWaves.shift();
+          var front = RIDGE_BANDS[RIDGE_BANDS.length - 1];
+          var uu = clamp(cx / W, 0.02, 0.98);
+          var spineY = ridgeY(front, uu, elapsed * 0.001) / H;
+          birds.push({
+            x: uu,
+            y: clamp(spineY + 0.022, 0.10, 0.52),
+            v: rand(0.004, 0.010),
+            s: rand(0.8, 1.5),
+            ph: rand(0, 6.28),
+            a: 0,
+            emerge: 0.85
+          });
+          if (birds.length > 8) birds.shift();
+          return;
+        }
+
+        var floor = cy < y0 ? y0 + (y0 - cy) * 0.22 : cy;
+        ripples.push({
+          x: cx, y: clamp(floor, y0 + 4, H - 4),
+          r0: Math.min(W, H) * 0.012, rmax: Math.min(W, H) * 0.19,
+          t: 0, life: 1600
+        });
+        if (ripples.length > 6) ripples.shift();
+
+        for (var sk = 0; sk < 10; sk++) {
+          splashes.push({
+            x: cx, y: clamp(floor, y0 + 4, H - 4),
+            vx: rand(-90, 90), vy: rand(-230, -90),
+            life: 1, size: rand(1, 2.4)
+          });
+        }
+      }
+
+      function updateInteraction(dts) {
+        var y0 = H * HORIZON;
+        if (pointer.inside) {
+          var px = pointer.x * W, py = pointer.y * H;
+          if (py > y0 + 6) {
+            if (elapsed - lastHoverWake > 160) {
+              lastHoverWake = elapsed;
+              ripples.push({
+                x: px, y: py,
+                r0: Math.min(W, H) * 0.003, rmax: Math.min(W, H) * 0.05,
+                t: 0, life: 950
+              });
+              if (ripples.length > 9) ripples.shift();
+            }
+          }
+        }
+
+        var i;
+        for (i = splashes.length - 1; i >= 0; i--) {
+          var s = splashes[i];
+          s.x += s.vx * dts;
+          s.y += s.vy * dts;
+          s.vy += 420 * dts;
+          s.life -= dts * 1.5;
+          if (s.life <= 0) splashes.splice(i, 1);
+        }
+        for (i = ridgeWaves.length - 1; i >= 0; i--) {
+          ridgeWaves[i].t += dts;
+          if (ridgeWaves[i].t > 2.6) ridgeWaves.splice(i, 1);
+        }
+      }
+
+      function drawSplashes() {
+        if (!splashes.length) return;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (var i = 0; i < splashes.length; i++) {
+          var s = splashes[i];
+          ctx.fillStyle = 'rgba(214,244,238,' + (s.life * 0.7).toFixed(3) + ')';
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, s.size, 0, 6.283);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+
+      function bindInput() {
+        var downX = 0, downY = 0;
+
+        window.addEventListener('pointermove', function (e) {
+          pointer.tx = e.clientX / window.innerWidth;
+          pointer.ty = e.clientY / window.innerHeight;
+          pointer.inside = true;
+
+          if (pointer.down) {
+            var pm = toCanvas(e);
+            var dxm = pm.x - lastPx, dym = pm.y - lastPy;
+            var distm = Math.sqrt(dxm * dxm + dym * dym);
+            lastPx = pm.x;
+            lastPy = pm.y;
+            dragWind = clamp(dragWind + distm * 0.0022, 0, 1.8);
+          }
+          markInput();
+        }, { passive: true });
+
+        window.addEventListener('dblclick', function (e) {
+          var p = toCanvas(e);
+          dragWind = 1.8;
+          for (var k = 0; k < 6; k++) {
+            var gx = p.x + (Math.random() - 0.5) * W * 0.22;
+            var gy = p.y + (Math.random() - 0.5) * H * 0.18;
+            pushFog(gx, gy, 1.2);
+          }
+          gusts.push({
+            x: p.x, y: p.y,
+            r0: Math.min(W, H) * 0.02, rmax: Math.min(W, H) * 0.38,
+            t: 0, life: 1200
+          });
+          markInput();
+        });
+
+        window.addEventListener('pointerdown', function (e) {
+          pointer.down = true;
+          var p = toCanvas(e);
+          downX = p.x;
+          downY = p.y;
+          lastPx = p.x;
+          lastPy = p.y;
+          markInput();
+        });
+
+        window.addEventListener('pointerup', function (e) {
+          var p = toCanvas(e);
+          var moved = Math.abs(p.x - downX) + Math.abs(p.y - downY);
+          if (pointer.down && moved < 16 * DPR) pulse(p.x, p.y);
+          pointer.down = false;
+          markInput();
+        });
+
+        window.addEventListener('pointerleave', function () {
+          pointer.inside = false;
+          pointer.down = false;
+        });
+
+        window.addEventListener('blur', function () {
+          pointer.down = false;
+          pointer.inside = false;
+        });
+      }
+
+      function smoothPointer() {
+        pointer.x += (pointer.tx - pointer.x) * 0.06;
+        pointer.y += (pointer.ty - pointer.y) * 0.06;
+        var targetX = (pointer.x - 0.5) * 2;
+        var targetY = (pointer.y - 0.5) * 2;
+        if (!pointer.inside) { targetX *= 0.35; targetY *= 0.35; }
+        par.x += (targetX - par.x) * 0.045;
+        par.y += (targetY - par.y) * 0.045;
+      }
+
+      /* =====================================================================
+       * 7. 节能
+       * ===================================================================== */
+      var lastInput = 0;
+      var ecoLevel = 0;
+
+      function markInput() { lastInput = elapsed; }
+
+      function ecoFactor() {
+        var idle = elapsed - lastInput;
+        if (idle < 5000) return 1;
+        if (idle < 20000) return 0.55;
+        return 0.4;
+      }
+
+      /* =====================================================================
+       * 8. 主循环
+       * ===================================================================== */
+      var acc = 0;
+
+      function frame(ts) {
+        requestAnimationFrame(frame);
+        if (!lastTs) lastTs = ts;
+        dt = Math.min(ts - lastTs, 66);
+        lastTs = ts;
+
+        if (reduceMotion) dt = Math.min(dt, 33);
+        elapsed += dt;
+
+        if (!frame.envAt || elapsed - frame.envAt > 1000) {
+          frame.envAt = elapsed;
+          applyEnv();
+        }
+
+        var mt = reduceMotion ? 0.35 : 1;
+        var budget = ecoFactor() * mt;
+        acc += dt * budget;
+        if (acc < 16.6) return;
+        acc = 0;
+
+        var time = elapsed * 0.001;
+
+        smoothPointer();
+        dragWind *= Math.pow(0.35, dt / 1000);
+        updateInteraction(dt / 1000);
+
+        ctx.globalCompositeOperation = 'source-over';
+        drawSky(time);
+        drawStars(time);
+        drawSun(time);
+        drawWisps(time);
+        drawBirds(time);
+
+        for (var i = 0; i < RIDGE_BANDS.length; i++) {
+          drawRidgeFill(RIDGE_BANDS[i], time, i);
+          if (i < RIDGE_BANDS.length - 1) drawFogBands(time);
+        }
+        drawWater(time);
+        drawFog(time);
+        drawPrecip(time);
+        drawRipples();
+        drawSplashes();
+        drawGusts(time);
+        drawVignette();
+      }
+
+      /* =====================================================================
+       * 9. 时钟（左下角，交互唤醒浮现）
+       * ===================================================================== */
+      var clockWrap = document.getElementById('clockwrap');
+      var clockMain = document.getElementById('clock-main');
+      var clockSec = document.getElementById('clock-sec');
+      var clockDate = document.getElementById('clock-date');
+      var clockTimer = 0;
+      var WEEK_CN = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
+
+      function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+
+      function tickClock() {
+        var d = new Date();
+        clockMain.textContent = pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+        clockSec.textContent = pad2(d.getSeconds());
+        clockDate.textContent = d.getFullYear() + '年' + (d.getMonth() + 1) + '月' + d.getDate() + '日　' + WEEK_CN[d.getDay()];
+      }
+
+      function wakeClock() {
+        if (!clockWrap || !clockWrap.classList) return;
+        clockWrap.classList.remove('hidden');
+        clearTimeout(clockTimer);
+        clockTimer = setTimeout(function () {
+          clockWrap.classList.add('hidden');
+        }, 6500);
+      }
+
+      tickClock();
+      setInterval(tickClock, 1000);
+      wakeClock();
+      window.addEventListener('pointermove', wakeClock, { passive: true });
+      window.addEventListener('pointerdown', wakeClock, { passive: true });
+      window.addEventListener('keydown', wakeClock);
+
+      /* =====================================================================
+       * 10. 启动
+       * ===================================================================== */
+      function start() {
+        resize();
+        applyEnv();
+        bindInput();
+        lastInput = 0;
+        lastTs = 0;
+
+        var onResize = function () {
+          clearTimeout(resizeTimer);
+          resizeTimer = setTimeout(resize, 160);
+        };
+        window.addEventListener('resize', onResize);
+        window.addEventListener('orientationchange', onResize);
+
+        window.addEventListener('contactable:env', function () {
+          applyEnv();
+        });
+
+        requestAnimationFrame(frame);
+      }
+
+      start();
+    })();
+  </script>
+</body>
+
+</html>

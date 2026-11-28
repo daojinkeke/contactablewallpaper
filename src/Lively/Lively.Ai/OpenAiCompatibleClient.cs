@@ -73,6 +73,12 @@ namespace Lively.Ai
         public int? PromptTokens { get; set; }
         public int? CompletionTokens { get; set; }
         public int? TotalTokens { get; set; }
+
+        /// <summary>
+        /// 结束原因。主流兼容服务在最后一个增量里给出 "stop" / "length"；
+        /// "length" 表示撞到单次输出上限被截断，调用方必须据此判定内容不完整。
+        /// </summary>
+        public string FinishReason { get; set; }
     }
 
     /// <summary>
@@ -81,6 +87,12 @@ namespace Lively.Ai
     public class OpenAiCompatibleClient
     {
         private readonly HttpClient httpClient;
+
+        /// <summary>
+        /// DeepSeek 未显式传 max_tokens 时会使用较小的默认输出上限，复杂壁纸容易在 20KB 左右被截断。
+        /// 这里给足空间（约 250KB HTML），仍远低于模型 384K 的硬上限。
+        /// </summary>
+        private const int MaxGenerationTokens = 65536;
 
         public OpenAiCompatibleClient(HttpClient httpClient = null)
         {
@@ -192,8 +204,14 @@ namespace Lively.Ai
                         if (chunk == null)
                             continue;
 
-                        // 有增量即重置空闲计时。
-                        idleCts.CancelAfter(TimeSpan.FromSeconds(settings.TimeoutSeconds));
+                        // 只有可见内容或结束/用量块才重置空闲计时；
+                        // 避免模型持续输出思维链时把空闲超时无限延后，导致既慢又烧 token。
+                        if (!string.IsNullOrEmpty(chunk.Content) ||
+                            !string.IsNullOrEmpty(chunk.FinishReason) ||
+                            chunk.TotalTokens.HasValue)
+                        {
+                            idleCts.CancelAfter(TimeSpan.FromSeconds(settings.TimeoutSeconds));
+                        }
                         yield return chunk;
                     }
                 }
@@ -247,6 +265,11 @@ namespace Lively.Ai
             };
             if (includeUsage)
                 payload["stream_options"] = new JObject { ["include_usage"] = true };
+            // DeepSeek Flash/V4 默认开启思考模式：长文生成会先输出大量思维链，
+            // 既拖慢响应又成倍消耗输出 token。壁纸生成只需要最终 HTML，显式关闭。
+            AiRequestModes.DisableThinking(payload, settings);
+            if (AiRequestModes.SupportsThinkingToggle(settings))
+                payload["max_tokens"] = MaxGenerationTokens;
 
             using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
             {
@@ -296,8 +319,15 @@ namespace Lively.Ai
             var choice = obj["choices"] is JArray choices && choices.Count > 0 ? choices[0] : null;
             var content = ExtractChoiceContent(choice);
             chunk.Content = content;
+            if (choice is JObject choiceObject)
+            {
+                var finishReason = choiceObject["finish_reason"]?.ToString();
+                if (!string.IsNullOrEmpty(finishReason) && finishReason != "null")
+                    chunk.FinishReason = finishReason;
+            }
 
-            if (chunk.Content == null && chunk.TotalTokens == null && chunk.PromptTokens == null && chunk.CompletionTokens == null)
+            if (chunk.Content == null && chunk.TotalTokens == null && chunk.PromptTokens == null &&
+                chunk.CompletionTokens == null && string.IsNullOrEmpty(chunk.FinishReason))
                 return null;
             return chunk;
         }
@@ -338,10 +368,17 @@ namespace Lively.Ai
                     throw new AiGenerationException(AiFailureKind.Protocol, "AI 服务返回错误：" + Truncate(message, 160));
                 }
 
+                var choice = obj["choices"] is JArray choices && choices.Count > 0 ? choices[0] : null;
                 var chunk = new CompletionChunk
                 {
-                    Content = ExtractChoiceContent(obj["choices"] is JArray choices && choices.Count > 0 ? choices[0] : null)
+                    Content = ExtractChoiceContent(choice)
                 };
+                if (choice is JObject choiceObject)
+                {
+                    var finishReason = choiceObject["finish_reason"]?.ToString();
+                    if (!string.IsNullOrEmpty(finishReason) && finishReason != "null")
+                        chunk.FinishReason = finishReason;
+                }
                 if (obj["usage"] is JObject usage)
                 {
                     chunk.PromptTokens = usage.Value<int?>("prompt_tokens");

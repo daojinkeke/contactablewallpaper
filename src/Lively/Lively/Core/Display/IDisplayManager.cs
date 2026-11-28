@@ -20,6 +20,11 @@ namespace Lively.Core.Display
 
         DisplayMonitor GetDisplayMonitorFromHWnd(IntPtr hWnd);
         DisplayMonitor GetDisplayMonitorFromPoint(Point point);
+
+        /// <summary>
+        /// 按 DeviceId（兼容 DeviceName）解析显示器，解析不到返回 null。
+        /// </summary>
+        DisplayMonitor GetDisplayMonitor(string deviceId);
         bool IsMultiScreen();
         uint OnHwndCreated(IntPtr hWnd, out bool register);
         bool ScreenExists(DisplayMonitor display);

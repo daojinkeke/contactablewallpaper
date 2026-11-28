@@ -7,7 +7,7 @@
     xmlns:local="clr-namespace:Lively.Views"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:p="clr-namespace:Lively.Properties"
-    Title="Lively Diagnostics"
+    Title="Contactable Wallpaper Diagnostics"
     Width="300"
     Height="250"
     ResizeMode="CanMinimize"
@@ -28,12 +28,6 @@
                 Margin="0,0,0,5"
                 Command="{Binding OpenLogViewCommand}"
                 Content="{ext:LocalizedString Debug_Description}" />
-            <Button
-                MinWidth="200"
-                MinHeight="35"
-                Margin="0,0,0,5"
-                Command="{Binding OpenHelpCommand}"
-                Content="{ext:LocalizedString ReportBug_Description}" />
             <ToggleButton
                 MinWidth="200"
                 MinHeight="35"

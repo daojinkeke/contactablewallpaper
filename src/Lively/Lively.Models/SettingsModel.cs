@@ -68,10 +68,18 @@ namespace Lively.Models
         /// </summary>
         public bool InteractionForwardMiddleButton { get; set; }
         /// <summary>
+        /// 是否转发键盘（与鼠标转发模式解耦）。仅在 InteractionEnabled 为 true 时生效。
+        /// </summary>
+        public bool InteractionForwardKeyboard { get; set; }
+        /// <summary>
         /// 交互默认值的迁移版本：0/缺省表示旧配置（交互默认关闭），1 表示总开关已迁移为开启，
-        /// 2 表示滚轮转发也已迁移为开启（中键始终保留默认关闭）。
+        /// 2 表示滚轮转发也已迁移为开启，3 表示键盘转发也已迁移为开启（中键始终保留默认关闭）。
         /// </summary>
         public int InteractionDefaultsVersion { get; set; }
+        /// <summary>
+        /// 是否允许生成的壁纸访问外部网络。默认 false：按离线约束校验并在运行时拦截本地 HTML 壁纸的外部请求。
+        /// </summary>
+        public bool AllowExternalNetwork { get; set; }
         public int TileSize { get; set; }
         public DisplayIdentificationMode DisplayIdentification { get; set; }
         public LivelyMediaPlayer VideoPlayer { get; set; }
@@ -211,7 +219,11 @@ namespace Lively.Models
             InteractionEnabled = true;
             InteractionForwardWheel = true;
             InteractionForwardMiddleButton = false;
+            InteractionForwardKeyboard = true;
             InteractionDefaultsVersion = 0;
+
+            // 外部联网默认关闭：旧配置缺该字段时反序列化为 false，不改变现有默认行为。
+            AllowExternalNetwork = false;
 
             TileSize = 1;
             DisplayIdentification = DisplayIdentificationMode.deviceId;

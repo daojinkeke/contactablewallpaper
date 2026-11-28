@@ -70,11 +70,20 @@ namespace Lively.Ai.Cli
                 Console.WriteLine("配置文件：" + store.SettingsPath);
                 Console.WriteLine("BaseUrl  ：" + (string.IsNullOrWhiteSpace(settings.BaseUrl) ? "（未填写）" : settings.BaseUrl));
                 Console.WriteLine("Model    ：" + (string.IsNullOrWhiteSpace(settings.Model) ? "（未填写）" : settings.Model));
+                var vision = store.ResolveVision(settings, false);
+                Console.WriteLine("视觉模型 ：" + (string.IsNullOrWhiteSpace(vision.Model)
+                    ? "（未填写）"
+                    : vision.Model + " @ " + vision.BaseUrl +
+                      (string.IsNullOrWhiteSpace(settings.VisionModel) ? "（自动）" : string.Empty)));
                 Console.WriteLine("Provider ：" + (string.IsNullOrWhiteSpace(settings.Provider) ? "（未填写，可忽略）" : settings.Provider));
                 Console.WriteLine("Timeout  ：" + settings.TimeoutSeconds + " 秒（无增量超时）");
                 Console.WriteLine("自动修复 ：最多 " + settings.MaxRepairAttempts + " 次");
                 Console.WriteLine("默认交互 ：" + DescribeInteraction(settings.DefaultInteraction) +
                                   "（generate 未传 --interaction 时使用）");
+                Console.WriteLine("默认风格 ：" + DescribeStyle(ParseStyle(settings.DefaultStyle)) +
+                                  "（generate/revise 未传 --style 时使用）");
+                Console.WriteLine("默认配色 ：" + (string.IsNullOrWhiteSpace(settings.DefaultColor) ? "自动" : settings.DefaultColor) +
+                                  "（未传 --color 时使用）");
                 Console.WriteLine("自我精修 ：最多 " + settings.MaxRefineRounds + " 轮，低于 " +
                                   settings.RefineScoreThreshold.ToString("0.0") + "/10 时重写" +
                                   (settings.MaxRefineRounds <= 0 ? "（已关闭）" : string.Empty));
@@ -96,6 +105,11 @@ namespace Lively.Ai.Cli
                 var interaction = GetArg(args, "--interaction");
                 var refineRounds = GetArg(args, "--refine-rounds");
                 var refineThreshold = GetArg(args, "--refine-threshold");
+                var visionBaseUrl = GetArg(args, "--vision-base-url");
+                var visionModel = GetArg(args, "--vision-model");
+                var visionApiKey = GetArg(args, "--vision-api-key");
+                var defaultStyle = GetArg(args, "--default-style");
+                var defaultColor = GetArg(args, "--default-color");
 
                 if (baseUrl != null)
                 {
@@ -111,6 +125,21 @@ namespace Lively.Ai.Cli
                     settings.Model = model.Trim();
                 if (provider != null)
                     settings.Provider = provider.Trim();
+                if (visionBaseUrl != null)
+                {
+                    if (visionBaseUrl.Length > 0 &&
+                        !visionBaseUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+                        !visionBaseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Console.Error.WriteLine("--vision-base-url 必须以 http:// 或 https:// 开头（留空表示沿用主 BaseUrl）。");
+                        return 2;
+                    }
+                    settings.VisionBaseUrl = visionBaseUrl.Trim();
+                }
+                if (visionModel != null)
+                    settings.VisionModel = visionModel.Trim();
+                if (visionApiKey != null)
+                    store.SetVisionApiKey(settings, visionApiKey.Trim());
                 if (timeout != null)
                 {
                     if (!int.TryParse(timeout, out var seconds) || seconds < 5 || seconds > 600)
@@ -160,11 +189,35 @@ namespace Lively.Ai.Cli
                 if (apiKey != null)
                     store.SetApiKey(settings, apiKey.Trim());
 
+                if (defaultStyle != null)
+                {
+                    if (!TryParseStyle(defaultStyle, out var style))
+                    {
+                        Console.Error.WriteLine("--default-style 只接受 auto|minimal|cyber|nature|pixel|ink|custom|ocean|space|aurora|ember|desert|glass|retro|geometry（auto 表示不指定）。");
+                        return 2;
+                    }
+                    settings.DefaultStyle = style.ToString();
+                }
+                if (defaultColor != null)
+                {
+                    var normalized = NormalizeColor(defaultColor);
+                    if (normalized == null && !IsUnspecifiedValue(defaultColor))
+                    {
+                        Console.Error.WriteLine("--default-color 需要是 #RRGGBB；传 auto/none 或留空表示不指定配色。");
+                        return 2;
+                    }
+                    settings.DefaultColor = normalized ?? string.Empty;
+                }
+
                 store.Save(settings);
                 Console.WriteLine("已保存：" + store.SettingsPath);
                 Console.WriteLine("BaseUrl  ：" + (string.IsNullOrWhiteSpace(settings.BaseUrl) ? "（未填写）" : settings.BaseUrl));
                 Console.WriteLine("Model    ：" + (string.IsNullOrWhiteSpace(settings.Model) ? "（未填写）" : settings.Model));
+                var savedVision = store.ResolveVision(settings, false);
+                Console.WriteLine("视觉模型 ：" + (string.IsNullOrWhiteSpace(savedVision.Model) ? "（未填写）" : savedVision.Model));
                 Console.WriteLine("默认交互 ：" + DescribeInteraction(settings.DefaultInteraction));
+                Console.WriteLine("默认风格 ：" + DescribeStyle(ParseStyle(settings.DefaultStyle)));
+                Console.WriteLine("默认配色 ：" + (string.IsNullOrWhiteSpace(settings.DefaultColor) ? "自动" : settings.DefaultColor));
                 Console.WriteLine("API Key  ：" + DescribeKey(settings, store.GetApiKey(settings)));
                 Console.WriteLine("提示：API Key 使用 Windows DPAPI(CurrentUser) 加密，仅当前用户可解密，不会写入日志。");
                 return 0;
@@ -187,6 +240,7 @@ namespace Lively.Ai.Cli
         {
             var sessionId = GetArg(args, "--session") ?? GetArg(args, "-s");
             var instruction = GetArg(args, "--prompt") ?? GetArg(args, "-p");
+            var imagePath = GetArg(args, "--image") ?? GetArg(args, "-i");
             if (string.IsNullOrWhiteSpace(sessionId))
             {
                 Console.Error.WriteLine("缺少 --session。示例：revise --session wp-xxxx --prompt \"把光晕调暗一点\"");
@@ -196,6 +250,15 @@ namespace Lively.Ai.Cli
             {
                 Console.Error.WriteLine("缺少 --prompt（本次修改诉求）。");
                 return 2;
+            }
+            if (!string.IsNullOrWhiteSpace(imagePath))
+            {
+                imagePath = Path.GetFullPath(imagePath);
+                if (!File.Exists(imagePath))
+                {
+                    Console.Error.WriteLine("找不到参考图片：" + imagePath);
+                    return 2;
+                }
             }
 
             var sessions = new WallpaperSessionStore();
@@ -233,28 +296,71 @@ namespace Lively.Ai.Cli
             var ecoFlag = GetEcoFlag(args);
             var eco = ecoFlag ?? session.Eco;
 
+            // --style/--color 未显式传入时沿用配置里的默认预设（auto = 不指定）。
+            var styleArg = GetArg(args, "--style");
+            var style = styleArg != null ? ParseStyle(styleArg) : ParseStyle(settings.DefaultStyle);
+            var color = GetArg(args, "--color") ?? (string.IsNullOrWhiteSpace(settings.DefaultColor) ? null : settings.DefaultColor);
+
             var request = new GenerationRequest
             {
                 Prompt = session.Prompt,
                 TargetWidth = width,
                 TargetHeight = height,
                 Interaction = interaction,
-                Style = ParseStyle(GetArg(args, "--style")),
-                PrimaryColor = GetArg(args, "--color"),
+                Style = style,
+                PrimaryColor = color,
                 OfflineRequired = true,
+                AllowExternalNetwork = HasAllowNetworkFlag(args),
                 EcoMode = eco
             };
 
             Console.WriteLine($"会话 {sessionId}：基于 v{session.Versions[^1].Version} 修改");
             Console.WriteLine($"修改诉求：{instruction}");
+            Console.WriteLine("风格/配色：" + DescribeStyle(style) + " · " + (string.IsNullOrWhiteSpace(color) ? "自动" : color) +
+                              (styleArg == null ? "（风格来自默认设置）" : string.Empty));
             Console.WriteLine("节能模式：" + (eco ? "开" : "关") +
                               (ecoFlag.HasValue ? "（本次显式指定）" : "（沿用会话设置）"));
+
+            RevisionAttachment attachment = null;
+            string referenceDescription = null;
+            if (!string.IsNullOrWhiteSpace(imagePath))
+            {
+                var visionEndpoint = store.ResolveVision(settings);
+                Console.WriteLine("视觉模型：" + visionEndpoint.Model + " @ " + visionEndpoint.BaseUrl);
+                Console.WriteLine("正在读取参考图片：" + Path.GetFileName(imagePath));
+
+                VisionDescribeResult described;
+                using (var visionHeartbeat = new ConsoleHeartbeat("正在理解参考图…"))
+                {
+                    described = await new VisionDescriber()
+                        .DescribeAsync(settings, visionEndpoint, imagePath, instruction, CancellationToken.None);
+                }
+                if (!described.Success)
+                {
+                    Console.Error.WriteLine("修改失败（" + (described.Failure?.ErrorCode ?? AiErrorCodes.ProtocolError) +
+                                            "）：读取参考图片失败：" + (described.Failure?.Message ?? "未知错误"));
+                    return 1;
+                }
+
+                referenceDescription = described.Description;
+                attachment = new RevisionAttachment
+                {
+                    SourcePath = imagePath,
+                    DisplayName = Path.GetFileName(imagePath),
+                    Description = referenceDescription
+                };
+                Console.WriteLine("参考图片已转述：" + FirstLine(referenceDescription));
+            }
 
             var service = new AiGenerationService(store);
             var stopwatch = Stopwatch.StartNew();
             GenerationEvent terminal = null;
-            await foreach (var item in service.ReviseAsync(sessionId, instruction, request, roundsOverride))
+            using var heartbeat = new ConsoleHeartbeat("等待模型响应…");
+            await foreach (var item in service.ReviseAsync(sessionId, instruction, request, roundsOverride,
+                               attachment, referenceDescription))
             {
+                heartbeat.Poke();
+
                 if (string.IsNullOrEmpty(item.ContentDelta))
                     PrintProgressEvent(item);
 
@@ -266,6 +372,7 @@ namespace Lively.Ai.Cli
                     break;
                 }
             }
+            heartbeat.Stop();
             stopwatch.Stop();
 
             if (terminal == null)
@@ -415,6 +522,12 @@ namespace Lively.Ai.Cli
             return null;
         }
 
+        /// <summary>
+        /// 外部联网开关：--allow-network 存在即为开启，默认关闭（与设置项默认值一致）。
+        /// </summary>
+        private static bool HasAllowNetworkFlag(string[] args) =>
+            Array.Exists(args, a => string.Equals(a, "--allow-network", StringComparison.OrdinalIgnoreCase));
+
         private static async Task<int> GenerateAsync(string[] args)
         {
             var prompt = GetArg(args, "--prompt") ?? GetArg(args, "-p");
@@ -422,6 +535,17 @@ namespace Lively.Ai.Cli
             {
                 Console.Error.WriteLine("缺少 --prompt。示例：generate --prompt \"星空下的吸积盘\" --out C:\\temp\\wallpaper.html");
                 return 2;
+            }
+
+            var imagePath = GetArg(args, "--image") ?? GetArg(args, "-i");
+            if (!string.IsNullOrWhiteSpace(imagePath))
+            {
+                imagePath = Path.GetFullPath(imagePath);
+                if (!File.Exists(imagePath))
+                {
+                    Console.Error.WriteLine("找不到参考图片：" + imagePath);
+                    return 2;
+                }
             }
 
             var store = new AiSettingsStore();
@@ -433,6 +557,30 @@ namespace Lively.Ai.Cli
                 Console.Error.WriteLine("或用环境变量临时提供：LIVELY_AI_BASE_URL / LIVELY_AI_MODEL / LIVELY_AI_API_KEY");
                 Console.Error.WriteLine("配置文件位置：" + store.SettingsPath);
                 return 2;
+            }
+
+            string referenceImageDescription = null;
+            if (!string.IsNullOrWhiteSpace(imagePath))
+            {
+                var visionEndpoint = store.ResolveVision(settings);
+                Console.WriteLine("视觉模型：" + visionEndpoint.Model + " @ " + visionEndpoint.BaseUrl);
+                Console.WriteLine("正在读取参考图片：" + Path.GetFileName(imagePath));
+
+                VisionDescribeResult described;
+                using (var visionHeartbeat = new ConsoleHeartbeat("正在理解参考图…"))
+                {
+                    described = await new VisionDescriber()
+                        .DescribeAsync(settings, visionEndpoint, imagePath, prompt, CancellationToken.None);
+                }
+                if (!described.Success)
+                {
+                    Console.Error.WriteLine("生成失败（" + (described.Failure?.ErrorCode ?? AiErrorCodes.ProtocolError) +
+                                            "）：读取参考图片失败：" + (described.Failure?.Message ?? "未知错误"));
+                    return 1;
+                }
+
+                referenceImageDescription = described.Description;
+                Console.WriteLine("参考图片已转述：" + FirstLine(referenceImageDescription));
             }
 
             var outputPath = GetArg(args, "--out") ?? GetArg(args, "-o") ??
@@ -486,21 +634,31 @@ namespace Lively.Ai.Cli
                 return 2;
             }
 
+            // --style/--color 未显式传入时沿用配置里的默认预设（auto = 不指定）。
+            var styleArg = GetArg(args, "--style");
+            var style = styleArg != null ? ParseStyle(styleArg) : ParseStyle(settings.DefaultStyle);
+            var color = GetArg(args, "--color") ?? (string.IsNullOrWhiteSpace(settings.DefaultColor) ? null : settings.DefaultColor);
+
             var request = new GenerationRequest
             {
                 Prompt = prompt,
                 TargetWidth = width,
                 TargetHeight = height,
-                Style = ParseStyle(GetArg(args, "--style")),
-                PrimaryColor = GetArg(args, "--color"),
+                Style = style,
+                PrimaryColor = color,
                 Interaction = interaction,
                 ReferenceText = referenceText ?? string.Empty,
                 OfflineRequired = true,
-                EcoMode = GetEcoFlag(args) ?? false
+                AllowExternalNetwork = HasAllowNetworkFlag(args),
+                EcoMode = GetEcoFlag(args) ?? false,
+                ReferenceImageDescription = referenceImageDescription ?? string.Empty,
+                ReferenceImagePath = imagePath ?? string.Empty,
+                ReferenceImageName = string.IsNullOrWhiteSpace(imagePath) ? string.Empty : Path.GetFileName(imagePath)
             };
 
             Console.WriteLine($"使用 {settings.Model} @ {settings.BaseUrl}");
             Console.WriteLine($"目标分辨率 {width}x{height}，输出 {outputPath}");
+            Console.WriteLine("风格/配色：" + DescribeStyle(style) + " · " + (string.IsNullOrWhiteSpace(color) ? "自动" : color));
             Console.WriteLine("交互能力：" + DescribeInteraction(request.Interaction) +
                               (interactionArg == null ? "（来自配置默认值）" : string.Empty));
             Console.WriteLine("节能模式：" + (request.EcoMode ? "开（注入低功耗行为约束）" : "关"));
@@ -511,6 +669,8 @@ namespace Lively.Ai.Cli
                 referenceParts.Add("外部参考（" + Path.GetFileName(referencePath) + "）");
             Console.WriteLine("参考代码：" +
                               (referenceParts.Count == 0 ? "未使用（交互已关闭）" : string.Join(" + ", referenceParts)));
+            if (!string.IsNullOrWhiteSpace(imagePath))
+                Console.WriteLine("参考图：" + Path.GetFileName(imagePath) + "（已转述，作为视觉参考）");
 
             var service = new AiGenerationService(store);
             var stopwatch = Stopwatch.StartNew();
@@ -518,8 +678,11 @@ namespace Lively.Ai.Cli
             long lastProgressMs = 0;
             GenerationEvent terminal = null;
 
+            using var heartbeat = new ConsoleHeartbeat("等待模型响应…");
             await foreach (var item in service.GenerateAsync(request, CancellationToken.None, roundsOverride))
             {
+                heartbeat.Poke();
+
                 if (string.IsNullOrEmpty(item.ContentDelta))
                     PrintProgressEvent(item);
 
@@ -541,6 +704,7 @@ namespace Lively.Ai.Cli
                     break;
                 }
             }
+            heartbeat.Stop();
 
             stopwatch.Stop();
 
@@ -567,7 +731,7 @@ namespace Lively.Ai.Cli
                 return 1;
             }
 
-            // 只写服务端标记为 ready 的草稿：它已通过 V001–V009（含精修轮次）。
+            // 只写服务端标记为 ready 的草稿：它已通过 V001–V008（含精修轮次）。
             var html = content.Length > 0
                 ? AiGenerationService.ExtractHtml(content.ToString())
                 : string.Empty;
@@ -709,6 +873,95 @@ namespace Lively.Ai.Cli
             }
         }
 
+        /// <summary>
+        /// 长时间等待模型首包/读图时定期输出心跳，避免 UI 看起来像卡死。
+        /// </summary>
+        private sealed class ConsoleHeartbeat : IDisposable
+        {
+            private static readonly long IdleThresholdTicks = TimeSpan.FromSeconds(10).Ticks;
+
+            private readonly CancellationTokenSource cts = new();
+            private readonly Task task;
+            private readonly string message;
+            private long lastActivityTicks;
+            private long lastReportTicks;
+            private int stopped;
+
+            public ConsoleHeartbeat(string message)
+            {
+                this.message = message;
+                lastActivityTicks = DateTime.UtcNow.Ticks;
+                lastReportTicks = lastActivityTicks;
+                task = Task.Run(RunAsync);
+            }
+
+            /// <summary>每次收到模型事件/内容时调用，表示链路仍然活跃。</summary>
+            public void Poke() => Interlocked.Exchange(ref lastActivityTicks, DateTime.UtcNow.Ticks);
+
+            private async Task RunAsync()
+            {
+                while (!cts.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(2), cts.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
+
+                    var now = DateTime.UtcNow.Ticks;
+                    var idleTicks = now - Interlocked.Read(ref lastActivityTicks);
+                    if (idleTicks < IdleThresholdTicks)
+                        continue;
+                    if (now - Interlocked.Read(ref lastReportTicks) < IdleThresholdTicks)
+                        continue;
+
+                    Interlocked.Exchange(ref lastReportTicks, now);
+                    var waited = (int)TimeSpan.FromTicks(idleTicks).TotalSeconds;
+                    Console.WriteLine($"{message}（已等待 {waited}s）");
+                }
+            }
+
+            public void Stop()
+            {
+                if (Interlocked.Exchange(ref stopped, 1) == 0)
+                {
+                    try
+                    {
+                        cts.Cancel();
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // ignore
+                    }
+                }
+            }
+
+            public void Dispose()
+            {
+                Stop();
+                try
+                {
+                    task.Wait(500);
+                }
+                catch (Exception)
+                {
+                    // ignore
+                }
+                cts.Dispose();
+            }
+        }
+
+        private static string FirstLine(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return string.Empty;
+            var line = text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+            return (line ?? string.Empty).Trim();
+        }
+
         private static void PrintMetrics(GenerationEvent terminal, TimeSpan elapsed)
         {
             var parts = new System.Collections.Generic.List<string>
@@ -743,7 +996,10 @@ namespace Lively.Ai.Cli
         {
             return !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("LIVELY_AI_BASE_URL")) ||
                    !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("LIVELY_AI_MODEL")) ||
-                   !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("LIVELY_AI_API_KEY"));
+                   !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("LIVELY_AI_API_KEY")) ||
+                   !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("LIVELY_AI_VISION_BASE_URL")) ||
+                   !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("LIVELY_AI_VISION_MODEL")) ||
+                   !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("LIVELY_AI_VISION_API_KEY"));
         }
 
         private static bool IsHelp(string value) =>
@@ -763,7 +1019,43 @@ namespace Lively.Ai.Cli
             int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : fallback;
 
         private static StylePreset ParseStyle(string? value) =>
-            Enum.TryParse<StylePreset>(value, true, out var style) ? style : StylePreset.auto;
+            TryParseStyle(value, out var style) ? style : StylePreset.auto;
+
+        /// <summary>解析风格键：空、auto、none 均表示不指定；数值与未定义值按非法处理。</summary>
+        private static bool TryParseStyle(string? value, out StylePreset style)
+        {
+            style = StylePreset.auto;
+            if (IsUnspecifiedValue(value))
+                return true;
+            if (!Enum.TryParse<StylePreset>(value, true, out var parsed) ||
+                !Enum.IsDefined(typeof(StylePreset), parsed) ||
+                int.TryParse(value, out _))
+                return false;
+            style = parsed;
+            return true;
+        }
+
+        private static string DescribeStyle(StylePreset style) =>
+            style == StylePreset.auto ? "不指定（由 AI 决定）" : style.ToString();
+
+        /// <summary>#RRGGBB 规范化；空、auto、none 返回 null 表示不指定配色。</summary>
+        private static string NormalizeColor(string? value)
+        {
+            if (IsUnspecifiedValue(value))
+                return null;
+            var text = value.Trim();
+            if (text.Length != 7 || text[0] != '#')
+                return null;
+            foreach (var c in text.Substring(1))
+                if (!Uri.IsHexDigit(c))
+                    return null;
+            return text.ToUpperInvariant();
+        }
+
+        private static bool IsUnspecifiedValue(string? value) =>
+            string.IsNullOrWhiteSpace(value) ||
+            string.Equals(value.Trim(), "auto", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(value.Trim(), "none", StringComparison.OrdinalIgnoreCase);
 
         /// <summary>解析 --interaction：none / all / 逗号组合（click,hover,drag,keyboard）。</summary>
         private static bool TryParseInteraction(string? value, out InteractionCapability interaction)
@@ -802,19 +1094,26 @@ namespace Lively.Ai.Cli
             Console.WriteLine();
             Console.WriteLine("配置：");
             Console.WriteLine("  Lively.Ai.Cli config set --base-url <https://.../v1> --model <模型名> --api-key <密钥> [--timeout 120] [--max-repairs 1] [--interaction hover,click] [--refine-rounds 2] [--refine-threshold 7.5]");
+            Console.WriteLine("                          [--default-style auto|minimal|cyber|...] [--default-color \"#RRGGBB\"|auto]（默认风格/配色，可留空）");
+            Console.WriteLine("                          [--vision-model deepseek-flash] [--vision-base-url <https://.../v1>] [--vision-api-key <密钥>]");
             Console.WriteLine("  Lively.Ai.Cli config show");
             Console.WriteLine("  Lively.Ai.Cli config clear-key");
             Console.WriteLine();
             Console.WriteLine("生成：");
-            Console.WriteLine("  Lively.Ai.Cli generate --prompt \"描述\" [--out 文件.html] [--width 1920] [--height 1080]");
-            Console.WriteLine("                          [--style auto|minimal|cyber|nature|pixel|ink|custom] [--color \"#RRGGBB\"]");
+            Console.WriteLine("  Lively.Ai.Cli generate --prompt \"描述\" [--image 参考图.jpg] [--out 文件.html] [--width 1920] [--height 1080]");
+            Console.WriteLine("                          [--style auto|minimal|cyber|nature|pixel|ink|custom|ocean|space|aurora|ember|desert|glass|retro|geometry]");
+            Console.WriteLine("                          （不传则用配置的默认风格；auto 表示不指定，由 AI 决定）");
+            Console.WriteLine("                          [--color \"#RRGGBB\"]（不传则用默认配色；都不指定则由 AI 决定）");
             Console.WriteLine("                          [--interaction hover,click]（none|click|hover|drag|keyboard，逗号组合；默认取配置）");
             Console.WriteLine("                          [--reference <html/js 文件>]（结构参考，限 32 KB，超限截断；不参与校验）");
             Console.WriteLine("                          [--eco]（节能模式：注入低功耗空闲降帧/交互恢复约束）");
+            Console.WriteLine("                          [--allow-network]（允许壁纸访问外部网络；默认关闭＝按离线约束校验）");
             Console.WriteLine();
             Console.WriteLine("继续对话修改：");
-            Console.WriteLine("  Lively.Ai.Cli revise --session <会话标识> --prompt \"修改诉求\" [--out 文件.html]");
+            Console.WriteLine("  Lively.Ai.Cli revise --session <会话标识> --prompt \"修改诉求\" [--image 参考图.jpg] [--out 文件.html]");
+            Console.WriteLine("                          [--style ...] [--color \"#RRGGBB\"]（不传则用配置的默认风格/配色）");
             Console.WriteLine("                          [--refine-rounds 0-3] [--eco|--no-eco]（不传则沿用会话设置）");
+            Console.WriteLine("                          [--allow-network]（允许壁纸访问外部网络；默认关闭）");
             Console.WriteLine("  Lively.Ai.Cli history --session <会话标识>");
             Console.WriteLine();
             Console.WriteLine("照片 → 深度视差壁纸（本地 MiDaS 推理，模型首次使用时下载）：");
@@ -822,6 +1121,7 @@ namespace Lively.Ai.Cli
             Console.WriteLine();
             Console.WriteLine("配置文件：%LOCALAPPDATA%\\Lively Wallpaper\\AiSettings.json（设置实例后缀时使用对应实例目录）");
             Console.WriteLine("环境变量：LIVELY_AI_BASE_URL / LIVELY_AI_MODEL / LIVELY_AI_API_KEY（优先级高于配置文件）");
+            Console.WriteLine("          LIVELY_AI_VISION_BASE_URL / LIVELY_AI_VISION_MODEL / LIVELY_AI_VISION_API_KEY（读图覆盖）");
         }
     }
 }

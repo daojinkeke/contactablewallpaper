@@ -19,12 +19,37 @@
       cursor: crosshair;
       user-select: none;
       -webkit-user-select: none;
+      animation: appear 1.6s ease .1s both;
+    }
+
+    @keyframes appear {
+      from {
+        opacity: 0;
+      }
+
+      to {
+        opacity: 1;
+      }
     }
 
     #scene {
       position: fixed;
       inset: 0;
+      /* canvas 是替换元素，仅靠 inset 无法撑满视口：width/height:auto 会退回
+         画布属性的固有尺寸（W×DPR），在非 1 倍缩放下画面被放大裁切、点击偏移。 */
+      width: 100%;
+      height: 100%;
       display: block;
+    }
+
+    .paper {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .5;
+      background:
+        radial-gradient(120% 80% at 22% 12%, rgba(255, 255, 255, .03), rgba(0, 0, 0, 0) 58%),
+        radial-gradient(90% 70% at 82% 88%, rgba(255, 255, 255, .022), rgba(0, 0, 0, 0) 62%);
     }
 
     .vignette {
@@ -34,12 +59,24 @@
       background:
         radial-gradient(95% 92% at 50% 50%, rgba(0, 0, 0, 0) 44%, rgba(0, 0, 0, .32) 76%, rgba(0, 0, 0, .7) 100%);
     }
+
+    .grain {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .05;
+      mix-blend-mode: overlay;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+      background-size: 160px 160px;
+    }
   </style>
 </head>
 
 <body>
   <canvas id="scene"></canvas>
+  <div class="paper"></div>
   <div class="vignette"></div>
+  <div class="grain"></div>
 
   <script>
     (function () {
@@ -50,19 +87,27 @@
       var ctx = canvas.getContext('2d', { alpha: false });
       var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-      var W = 0, H = 0, dpr = 1, bg = null, sprite = null;
-      var pointer = { x: 0.5, y: 0.5, sx: 0.5, sy: 0.5, active: false };
-      var plumes = [], rings = [];
-      var lastInput = performance.now(), eco = 0, lastDraw = 0, time = 0;
-      var swirl = 1;
+      var W = 0, H = 0, dpr = 1;
+      var bg = null;
+      var pointer = { x: 0.5, y: 0.5, sx: 0.5, sy: 0.5, active: false, down: false };
 
-      function markInput() {
-        lastInput = performance.now();
-        eco = 0;
+      var plumes = [], rings = [], droplets = [], trail = [], wash = [];
+      var sprite = null;
+
+      var lastInput = performance.now(), eco = 0, lastDraw = 0, time = 0;
+      var swirl = 1, inkBoost = 0;
+
+      function clamp(v, a, b) {
+        return v < a ? a : (v > b ? b : v);
       }
 
       function rand(a, b) {
         return a + Math.random() * (b - a);
+      }
+
+      function markInput() {
+        lastInput = performance.now();
+        eco = 0;
       }
 
       function buildSprite() {
@@ -71,106 +116,212 @@
         sprite.height = 64;
         var g = sprite.getContext('2d');
         var grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
-        grad.addColorStop(0, 'rgba(238, 238, 232, 1)');
-        grad.addColorStop(0.3, 'rgba(200, 200, 196, 0.42)');
-        grad.addColorStop(0.7, 'rgba(140, 140, 138, 0.12)');
-        grad.addColorStop(1, 'rgba(90, 90, 90, 0)');
+        grad.addColorStop(0, 'rgba(240, 240, 234, 0.42)');
+        grad.addColorStop(0.26, 'rgba(206, 206, 200, 0.2)');
+        grad.addColorStop(0.62, 'rgba(158, 158, 152, 0.07)');
+        grad.addColorStop(1, 'rgba(100, 100, 96, 0)');
         g.fillStyle = grad;
         g.fillRect(0, 0, 64, 64);
       }
 
       function resize() {
-        W = window.innerWidth;
-        H = window.innerHeight;
+        var rect = canvas.getBoundingClientRect();
+        W = rect.width || window.innerWidth;
+        H = rect.height || window.innerHeight;
         dpr = Math.min(2, window.devicePixelRatio || 1);
         canvas.width = Math.round(W * dpr);
         canvas.height = Math.round(H * dpr);
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.imageSmoothingEnabled = true;
 
-        bg = ctx.createRadialGradient(W * 0.5, H * 0.5, 0, W * 0.5, H * 0.5, Math.max(W, H) * 0.8);
-        bg.addColorStop(0, '#131315');
-        bg.addColorStop(0.55, '#0b0b0d');
-        bg.addColorStop(1, '#050506');
+        bg = ctx.createRadialGradient(W * 0.46, H * 0.44, 0, W * 0.5, H * 0.5, Math.max(W, H) * 0.85);
+        bg.addColorStop(0, '#161618');
+        bg.addColorStop(0.42, '#0c0c0e');
+        bg.addColorStop(1, '#040405');
 
         seedPlumes();
-      }
-
-      function seedPlumes() {
-        var count = Math.round(Math.min(160, Math.max(60, W * H / 9000)));
-        plumes = [];
-        for (var i = 0; i < count; i++) {
-          if (i < count * 0.35) {
-            var a = Math.random() * TAU;
-            var r = Math.pow(Math.random(), 1.6) * 0.22;
-            plumes.push(newPlume(0.5 + Math.cos(a) * r, 0.52 + Math.sin(a) * r * 0.7, rand(0.6, 1)));
-          } else {
-            plumes.push(newPlume(Math.random(), rand(0.05, 1), rand(0.4, 1)));
-          }
-        }
+        makeWash();
       }
 
       function newPlume(x, y, life) {
         return {
           x: x,
           y: y,
-          vx: rand(-0.006, 0.006),
-          vy: rand(-0.006, 0.006),
-          size: rand(0.012, 0.055),
+          px: x,
+          py: y,
+          vx: rand(-0.008, 0.008),
+          vy: rand(-0.008, 0.008),
+          size: rand(0.05, 0.17),
           life: life,
-          decay: rand(0.02, 0.07),
-          alpha: rand(0.12, 0.42),
+          decay: rand(0.014, 0.048),
+          alpha: rand(0.05, 0.16),
           spin: rand(-1, 1)
         };
       }
 
-      function drop(nx, ny) {
-        for (var i = 0; i < 40; i++) {
-          plumes.push(newPlume(nx + rand(-0.02, 0.02), ny + rand(-0.02, 0.02), 1));
+      function seedPlumes() {
+        var count = Math.round(clamp(W * H / 22000, 30, 90));
+        plumes = [];
+        var clusters = [];
+        for (var c = 0; c < 4; c++) {
+          clusters.push({ x: rand(0.16, 0.84), y: rand(0.22, 0.84) });
         }
-        rings.push({ x: nx, y: ny, r: 0, life: 0.9 });
+        for (var i = 0; i < count; i++) {
+          if (Math.random() < 0.78) {
+            var cl = clusters[i % clusters.length];
+            var a = Math.random() * TAU;
+            var r = Math.pow(Math.random(), 0.7) * 0.17;
+            plumes.push(newPlume(cl.x + Math.cos(a) * r, cl.y + Math.sin(a) * r * 0.8, rand(0.5, 1)));
+          } else {
+            plumes.push(newPlume(Math.random(), rand(0.05, 0.95), rand(0.35, 1)));
+          }
+        }
+      }
+
+      function makeWash() {
+        wash = [
+          { x: 0.16, y: 0.9, r: 0.34, alpha: 0.05, phase: 0 },
+          { x: 0.86, y: 0.94, r: 0.42, alpha: 0.045, phase: 2 },
+          { x: 0.62, y: 0.74, r: 0.22, alpha: 0.03, phase: 4 }
+        ];
+      }
+
+      function drop(nx, ny, power) {
+        var n = Math.round(34 * power);
+        for (var i = 0; i < n; i++) {
+          var np = newPlume(
+            nx + rand(-0.025, 0.025),
+            ny + rand(-0.025, 0.025),
+            1
+          );
+          np.alpha = rand(0.14, 0.28);
+          np.size = rand(0.03, 0.09);
+          plumes.push(np);
+        }
+        rings.push({ x: nx, y: ny, r: 0, life: 0.95, power: power });
+        for (var j = 0; j < 14 * power; j++) {
+          var a = Math.random() * TAU;
+          var v = rand(0.05, 0.24) * power;
+          droplets.push({
+            x: nx,
+            y: ny,
+            vx: Math.cos(a) * v,
+            vy: Math.sin(a) * v,
+            life: 1,
+            decay: rand(0.5, 1.3),
+            size: rand(0.8, 2.6)
+          });
+        }
+        inkBoost = 1;
       }
 
       function update(dt) {
-        pointer.sx += (pointer.x - pointer.sx) * Math.min(1, dt * 2.6);
-        pointer.sy += (pointer.y - pointer.sy) * Math.min(1, dt * 2.6);
-        var push = pointer.active ? 1 : 0.35;
+        pointer.sx += (pointer.x - pointer.sx) * Math.min(1, dt * 2.8);
+        pointer.sy += (pointer.y - pointer.sy) * Math.min(1, dt * 2.8);
+        inkBoost *= Math.pow(0.12, dt);
+        if (reduceMotion) return;
 
+        var push = pointer.active ? 1 : 0.35;
         for (var i = 0; i < plumes.length; i++) {
           var p = plumes[i];
+          p.px = p.x;
+          p.py = p.y;
           p.life -= p.decay * dt;
           if (p.life <= 0) {
             p.x = Math.random();
             p.y = Math.random();
+            p.px = p.x;
+            p.py = p.y;
             p.life = 1;
-            p.size = rand(0.006, 0.03);
+            p.size = rand(0.04, 0.12);
             continue;
           }
+
           var dx = p.x - pointer.sx;
           var dy = p.y - pointer.sy;
           var d = Math.sqrt(dx * dx + dy * dy) + 0.001;
-          var near = Math.max(0, 1 - d * 2.8) * push;
-          p.vx += (-dy / d) * near * 0.012 * swirl * dt;
-          p.vy += (dx / d) * near * 0.012 * swirl * dt;
-          p.vx += Math.sin(time * 0.6 + p.y * 8) * 0.0012 * dt;
-          p.vy += Math.cos(time * 0.5 + p.x * 9) * 0.0012 * dt;
-          p.vx *= 0.995;
-          p.vy *= 0.995;
-          p.x += p.vx;
-          p.y += p.vy;
+          var near = Math.max(0, 1 - d * 2.9) * push;
+          p.vx += (-dy / d) * near * 0.014 * swirl * dt;
+          p.vy += (dx / d) * near * 0.014 * swirl * dt;
+          p.vx += Math.sin(time * 0.6 + p.y * 8) * 0.0014 * dt;
+          p.vy += Math.cos(time * 0.5 + p.x * 9) * 0.0014 * dt;
+          p.vx *= Math.pow(0.5, dt * 0.1);
+          p.vy *= Math.pow(0.5, dt * 0.1);
+          p.x += p.vx * 60 * dt;
+          p.y += p.vy * 60 * dt;
+
           if (p.x < 0 || p.x > 1 || p.y < 0 || p.y > 1) {
             p.x = Math.random();
             p.y = Math.random();
-            p.vx = rand(-0.006, 0.006);
-            p.vy = rand(-0.006, 0.006);
+            p.px = p.x;
+            p.py = p.y;
           }
         }
 
-        for (var j = rings.length - 1; j >= 0; j--) {
-          var r = rings[j];
-          r.r += dt * 0.16;
-          r.life -= dt * 0.32;
-          if (r.life <= 0) rings.splice(j, 1);
+        for (var r = rings.length - 1; r >= 0; r--) {
+          var ring = rings[r];
+          ring.r += dt * 0.2;
+          ring.life -= dt * 0.3;
+          if (ring.life <= 0) rings.splice(r, 1);
         }
+
+        for (var k = droplets.length - 1; k >= 0; k--) {
+          var dr = droplets[k];
+          dr.life -= dt * dr.decay;
+          if (dr.life <= 0) {
+            droplets.splice(k, 1);
+            continue;
+          }
+          dr.x += dr.vx * dt;
+          dr.y += dr.vy * dt;
+          dr.vx *= Math.pow(0.4, dt);
+          dr.vy *= Math.pow(0.4, dt);
+        }
+
+        // 拖拽留下的墨迹逐渐淡出
+        for (var t = trail.length - 1; t >= 0; t--) {
+          trail[t].life -= dt * 0.5;
+          if (trail[t].life <= 0) trail.splice(t, 1);
+        }
+        if (trail.length > 160) trail.splice(0, trail.length - 160);
+      }
+
+      function drawWash() {
+        ctx.globalCompositeOperation = 'lighter';
+        for (var i = 0; i < wash.length; i++) {
+          var w = wash[i];
+          var r = w.r * Math.max(W, H);
+          var g = ctx.createRadialGradient(w.x * W, w.y * H, 0, w.x * W, w.y * H, r);
+          g.addColorStop(0, 'rgba(190, 190, 184, ' + w.alpha + ')');
+          g.addColorStop(0.55, 'rgba(150, 150, 146, ' + (w.alpha * 0.36) + ')');
+          g.addColorStop(1, 'rgba(90, 90, 88, 0)');
+          ctx.fillStyle = g;
+          ctx.beginPath();
+          ctx.arc(w.x * W, w.y * H, r, 0, TAU);
+          ctx.fill();
+        }
+        ctx.globalCompositeOperation = 'source-over';
+      }
+
+      function drawTrail() {
+        if (trail.length < 2) return;
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        for (var i = 1; i < trail.length; i++) {
+          var a = trail[i - 1];
+          var b = trail[i];
+          var age = b.life;
+          var dist = Math.sqrt(Math.pow((b.x - a.x) * W, 2) + Math.pow((b.y - a.y) * H, 2));
+          if (dist > 90) continue;
+          ctx.strokeStyle = 'rgba(232, 232, 226, ' + (age * 0.2) + ')';
+          ctx.lineWidth = Math.max(0.6, (1.2 + dist * 0.12) * age);
+          ctx.beginPath();
+          ctx.moveTo(a.x * W, a.y * H);
+          ctx.lineTo(b.x * W, b.y * H);
+          ctx.stroke();
+        }
+        ctx.globalCompositeOperation = 'source-over';
       }
 
       function draw() {
@@ -178,74 +329,151 @@
         ctx.fillStyle = bg;
         ctx.fillRect(0, 0, W, H);
 
+        drawWash();
+
         ctx.globalCompositeOperation = 'lighter';
+
         for (var i = 0; i < plumes.length; i++) {
           var p = plumes[i];
-          var s = p.size * Math.min(W, H) * (0.75 + p.life * 0.7);
-          ctx.globalAlpha = p.alpha * p.life;
+          var s = p.size * Math.min(W, H) * (0.7 + p.life * 0.8);
+          var speed = Math.sqrt(Math.pow((p.x - p.px) * W, 2) + Math.pow((p.y - p.py) * H, 2));
+
+          // 外层淡晕，把零散墨点连成墨团
+          ctx.globalAlpha = p.alpha * p.life * 0.28;
+          ctx.drawImage(sprite, p.x * W - s * 2.3, p.y * H - s * 2.3, s * 4.6, s * 4.6);
+
+          ctx.globalAlpha = p.alpha * p.life * (1 + Math.min(1.4, speed * 0.05));
           ctx.drawImage(sprite, p.x * W - s, p.y * H - s, s * 2, s * 2);
+
+          // 快速移动时拉出墨丝
+          if (speed > 2.2) {
+            ctx.strokeStyle = 'rgba(226, 226, 220, ' + (p.alpha * p.life * 0.22) + ')';
+            ctx.lineWidth = Math.max(0.5, s * 0.16);
+            ctx.beginPath();
+            ctx.moveTo(p.px * W, p.py * H);
+            ctx.lineTo(p.x * W, p.y * H);
+            ctx.stroke();
+          }
         }
         ctx.globalAlpha = 1;
 
+        drawTrail();
+
         for (var j = 0; j < rings.length; j++) {
           var r = rings[j];
-          ctx.strokeStyle = 'rgba(222, 222, 216, ' + (r.life * 0.35) + ')';
-          ctx.lineWidth = 0.8 + r.life * 1.6;
+          ctx.strokeStyle = 'rgba(228, 228, 222, ' + (r.life * 0.3) + ')';
+          ctx.lineWidth = 0.8 + r.life * 1.8;
           ctx.beginPath();
-          ctx.arc(r.x * W, r.y * H, r.r * Math.max(W, H), 0, TAU);
+          ctx.arc(r.x * W, r.y * H, r.r * Math.max(W, H) * (0.6 + r.power * 0.4), 0, TAU);
           ctx.stroke();
         }
 
+        for (var k = 0; k < droplets.length; k++) {
+          var d = droplets[k];
+          ctx.fillStyle = 'rgba(238, 238, 232, ' + (d.life * 0.6) + ')';
+          ctx.beginPath();
+          ctx.arc(d.x * W, d.y * H, d.size, 0, TAU);
+          ctx.fill();
+        }
+
         ctx.globalCompositeOperation = 'source-over';
+
+        // 指针墨晕
+        if (pointer.active) {
+          var gx = pointer.sx * W;
+          var gy = pointer.sy * H;
+          var halo = ctx.createRadialGradient(gx, gy, 0, gx, gy, Math.max(W, H) * 0.16);
+          halo.addColorStop(0, 'rgba(226, 226, 220, ' + (0.055 + inkBoost * 0.05) + ')');
+          halo.addColorStop(1, 'rgba(180, 180, 176, 0)');
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.fillStyle = halo;
+          ctx.fillRect(0, 0, W, H);
+          ctx.globalCompositeOperation = 'source-over';
+        }
       }
 
       function frame(now) {
         var idle = now - lastInput;
-        var target = idle > 4000 ? 1 : 0;
-        eco += (target - eco) * 0.05;
-        var targetFps = 60 - eco * 40;
-        var step = 1000 / targetFps;
+        var target = idle > 4500 ? 1 : 0;
+        eco += (target - eco) * 0.045;
+        var step = 1000 / (60 - eco * 30);
         if (now - lastDraw < step - 1) {
           requestAnimationFrame(frame);
           return;
         }
         var dt = Math.min(0.1, (now - lastDraw) / 1000);
         lastDraw = now;
-        time += reduceMotion ? 0 : dt;
+        if (!reduceMotion) time += dt;
         update(dt);
         draw();
         requestAnimationFrame(frame);
       }
 
+      // 事件坐标统一换算为画布内的 0~1 比例，兼容 DPR、缩放与画布偏移。
+      function toLocal(e) {
+        var rect = canvas.getBoundingClientRect();
+        var sx = W / Math.max(1, rect.width);
+        var sy = H / Math.max(1, rect.height);
+        var lx = e.clientX - rect.left;
+        var ly = e.clientY - rect.top;
+        return {
+          x: clamp(lx / Math.max(1, rect.width), 0, 1),
+          y: clamp(ly / Math.max(1, rect.height), 0, 1),
+          px: lx * sx,
+          py: ly * sy
+        };
+      }
+
       window.addEventListener('resize', resize);
       window.addEventListener('pointermove', function (e) {
-        pointer.x = e.clientX / Math.max(1, W);
-        pointer.y = e.clientY / Math.max(1, H);
+        var p = toLocal(e);
+        pointer.x = p.x;
+        pointer.y = p.y;
         pointer.active = true;
+        if (pointer.down) {
+          trail.push({ x: pointer.x, y: pointer.y, life: 1 });
+          if (trail.length > 4 && Math.random() > 0.55) {
+            plumes.push(newPlume(pointer.x, pointer.y, rand(0.5, 0.9)));
+          }
+        }
         markInput();
       });
       window.addEventListener('pointerleave', function () {
         pointer.active = false;
+        pointer.down = false;
         pointer.x = 0.5;
         pointer.y = 0.5;
       });
       window.addEventListener('pointerdown', function (e) {
-        drop(e.clientX / Math.max(1, W), e.clientY / Math.max(1, H));
+        var p = toLocal(e);
+        pointer.down = true;
+        drop(p.x, p.y, 1);
         markInput();
+      });
+      window.addEventListener('pointerup', function () {
+        pointer.down = false;
+      });
+      window.addEventListener('pointercancel', function () {
+        pointer.down = false;
       });
       window.addEventListener('keydown', function (e) {
         if (e.key === ' ' || e.key === 'Enter') {
-          drop(0.5, 0.52);
+          drop(0.5, 0.52, 1.6);
         } else if (e.key === 'ArrowLeft') {
           swirl = -1;
         } else if (e.key === 'ArrowRight') {
           swirl = 1;
+        } else if (e.key === 'ArrowUp') {
+          swirl *= 1.4;
+        } else if (e.key === 'ArrowDown') {
+          swirl = swirl > 0 ? Math.max(0.4, swirl / 1.4) : Math.min(-0.4, swirl / 1.4);
         }
         markInput();
       });
 
       buildSprite();
       resize();
+      // 先同步绘制一帧，避免后台节流或截图时出现空白。
       frame(performance.now());
     })();
   </script>

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -32,6 +33,7 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
         private static readonly string[] ColorPalette =
         {
             "#22D3EE", "#6EA8FE", "#34D399", "#F472B6", "#F59E0B", "#94A3B8",
+            "#F87171", "#A78BFA", "#FBBF24", "#2DD4BF", "#FB923C", "#E879F9",
         };
 
         private static readonly string[] ExamplePrompts =
@@ -48,15 +50,20 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
         private readonly IDisplayManagerClient displayManager = App.Services.GetRequiredService<IDisplayManagerClient>();
         private readonly IContactableNavigator navigator = App.Services.GetRequiredService<IContactableNavigator>();
         private readonly IFileService fileService = App.Services.GetRequiredService<IFileService>();
+        private readonly IUserSettingsClient userSettings = App.Services.GetRequiredService<IUserSettingsClient>();
         private readonly AiSettingsStore aiSettingsStore = new();
+        private readonly AiProviderDetector aiProviderDetector = new();
         private readonly WallpaperSessionStore sessionStore = new();
         private AiSettings inlineAiSettings;
+        private bool isDetectingAi;
+        private bool suppressInlineModelSelection;
 
         private readonly ObservableCollection<RecentItemVm> recentItems = new();
         private readonly Dictionary<string, Button> colorButtons = new();
 
-        private string selectedStyleKey = "cyber";
-        private string selectedColorHex = "#22D3EE";
+        // 默认「不指定」：用户不必先挑风格，留空时由 AI 按描述决定。
+        private string selectedStyleKey = ContactableStyles.AutoKey;
+        private string selectedColorHex;
         private GeneratedWallpaper current;
         private CancellationTokenSource generationCts;
         private CancellationTokenSource depthCts;
@@ -65,6 +72,8 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
         private int selectedVersion;
         private bool isRevising;
         private string selectedPhotoPath;
+        private string selectedGenerateImagePath;
+        private string selectedReviseImagePath;
         private bool isGenerating;
         private bool isDepthGenerating;
         private bool isBusy;
@@ -92,13 +101,15 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
                 viewBuilt = true;
             }
 
-            UpdateSelectionText();
             PromptCounter.Text = $"{PromptBox.Text?.Length ?? 0} / 2000";
 
             var configured = LoadInlineAiSettings(expandWhenUnconfigured: true);
+            ApplyDefaultPreset();
+            UpdateSelectionText();
+            UpdateColorSelection();
             if (!configured)
             {
-                ShowError("尚未配置 AI 服务：请在生成按钮下方填写 BaseUrl、Model 和 API Key。", true);
+                ShowError("尚未配置 AI 服务：请在下方粘贴 API Key 并保存，应用会自动识别服务商与模型。", true);
             }
             else
             {
@@ -106,6 +117,7 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
             }
 
             await RefreshRecentAsync();
+            UpdateStorageHints();
         }
 
         protected override void OnNavigatedFrom(NavigationEventArgs e)
@@ -176,6 +188,29 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
 
         private void BuildColorSwatches()
         {
+            // 「自动」= 不指定配色，由 AI 按描述决定。
+            var autoButton = new Button
+            {
+                Width = 34,
+                Height = 34,
+                Padding = new Thickness(0),
+                CornerRadius = new CornerRadius(17),
+                BorderThickness = new Thickness(0),
+                Background = new SolidColorBrush(ContactableStyles.ParseColor("#334155", Colors.Gray)),
+                Content = new TextBlock
+                {
+                    Text = "A",
+                    FontSize = 13,
+                    FontWeight = FontWeights.SemiBold,
+                },
+                Tag = string.Empty,
+            };
+            AutomationProperties.SetName(autoButton, "配色 自动");
+            ToolTipService.SetToolTip(autoButton, "不指定配色，由 AI 决定");
+            autoButton.Click += ColorSwatch_Click;
+            colorButtons[string.Empty] = autoButton;
+            ColorPanel.Children.Add(autoButton);
+
             foreach (var hex in ColorPalette)
             {
                 var color = ContactableStyles.ParseColor(hex, Colors.SteelBlue);
@@ -214,10 +249,34 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
             }
         }
 
+        /// <summary>进入页面时套用用户保存的默认风格/配色；未保存过则保持「不指定」。</summary>
+        private void ApplyDefaultPreset()
+        {
+            var styleKey = inlineAiSettings?.DefaultStyle;
+            selectedStyleKey = string.IsNullOrWhiteSpace(styleKey)
+                ? ContactableStyles.AutoKey
+                : ContactableStyles.Find(styleKey).Key;
+            selectedColorHex = NormalizeColor(inlineAiSettings?.DefaultColor);
+        }
+
+        private static string NormalizeColor(string hex) =>
+            string.IsNullOrWhiteSpace(hex) ? null : hex.Trim().ToUpperInvariant();
+
         private void UpdateSelectionText()
         {
             var style = ContactableStyles.Find(selectedStyleKey);
-            SelectedStyleText.Text = $"已选：{style.Name} · {selectedColorHex}";
+            var colorText = string.IsNullOrWhiteSpace(selectedColorHex) ? "配色自动" : selectedColorHex;
+            SelectedStyleText.Text = style.IsAuto ? $"风格未指定 · {colorText}" : $"已选：{style.Name} · {colorText}";
+            UpdateDefaultText();
+        }
+
+        private void UpdateDefaultText()
+        {
+            var style = ContactableStyles.Find(inlineAiSettings?.DefaultStyle);
+            var color = NormalizeColor(inlineAiSettings?.DefaultColor);
+            var styleText = style.IsAuto ? "不指定风格" : style.Name;
+            var colorText = string.IsNullOrWhiteSpace(color) ? "配色自动" : color;
+            DefaultStyleText.Text = $"默认：{styleText} · {colorText}。风格/配色都能留空，点「设为默认」记住当前选择。";
         }
 
         private void UpdateColorSelection()
@@ -234,7 +293,7 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
 
             foreach (var pair in colorButtons)
             {
-                var selected = string.Equals(pair.Key, selectedColorHex, StringComparison.OrdinalIgnoreCase);
+                var selected = string.Equals(pair.Key, selectedColorHex ?? string.Empty, StringComparison.OrdinalIgnoreCase);
                 pair.Value.BorderThickness = new Thickness(selected ? 2 : 0);
                 pair.Value.BorderBrush = selected ? accent : null;
             }
@@ -250,8 +309,18 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
                 return;
 
             var style = ContactableStyles.Find(key);
-            selectedStyleKey = style.Key;
-            selectedColorHex = style.ColorHex;
+            if (!style.IsAuto && string.Equals(style.Key, selectedStyleKey, StringComparison.OrdinalIgnoreCase))
+            {
+                // 再次点击已选卡片 = 取消选择，回到「不指定」。
+                selectedStyleKey = ContactableStyles.AutoKey;
+                selectedColorHex = null;
+            }
+            else
+            {
+                selectedStyleKey = style.Key;
+                selectedColorHex = style.ColorHex;
+            }
+
             UpdateSelectionText();
             UpdateColorSelection();
         }
@@ -260,9 +329,27 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
         {
             if (sender is Button button && button.Tag is string hex)
             {
-                selectedColorHex = hex;
+                selectedColorHex = string.IsNullOrWhiteSpace(hex) ? null : hex;
                 UpdateSelectionText();
                 UpdateColorSelection();
+            }
+        }
+
+        /// <summary>把当前风格与配色写进 AiSettings，下次进入页面自动选中。</summary>
+        private void SaveDefaultStyle_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                inlineAiSettings ??= aiSettingsStore.Load(applyEnvironmentOverrides: false);
+                inlineAiSettings.DefaultStyle = ContactableStyles.Find(selectedStyleKey).Key;
+                inlineAiSettings.DefaultColor = selectedColorHex ?? string.Empty;
+                aiSettingsStore.Save(inlineAiSettings);
+                UpdateDefaultText();
+                ShowStatus(InfoBarSeverity.Success, "已设为默认，下次新建壁纸会自动带上这套风格与配色。");
+            }
+            catch (Exception ex)
+            {
+                ShowStatus(InfoBarSeverity.Error, $"保存默认预设失败：{ex.Message}");
             }
         }
 
@@ -283,7 +370,7 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
         private void GoSettingsButton_Click(object sender, RoutedEventArgs e)
         {
             SetInlineAiPanelVisible(true);
-            InlineBaseUrlBox.Focus(FocusState.Programmatic);
+            InlineApiKeyBox.Focus(FocusState.Programmatic);
         }
 
         #endregion
@@ -293,9 +380,19 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
         private bool LoadInlineAiSettings(bool expandWhenUnconfigured)
         {
             inlineAiSettings = aiSettingsStore.Load(applyEnvironmentOverrides: false);
+            InlineApiKeyBox.Password = string.Empty;
             InlineBaseUrlBox.Text = inlineAiSettings.BaseUrl ?? string.Empty;
             InlineModelBox.Text = inlineAiSettings.Model ?? string.Empty;
-            InlineApiKeyBox.Password = string.Empty;
+            InlineVisionModelBox.Text = inlineAiSettings.VisionModel ?? string.Empty;
+
+            var hasModel = !string.IsNullOrWhiteSpace(inlineAiSettings.Model);
+            suppressInlineModelSelection = true;
+            InlineModelCombo.Items.Clear();
+            if (hasModel)
+                InlineModelCombo.Items.Add(inlineAiSettings.Model);
+            InlineModelCombo.SelectedIndex = hasModel ? 0 : -1;
+            InlineModelCombo.IsEnabled = hasModel;
+            suppressInlineModelSelection = false;
 
             isLoadingEco = true;
             EcoToggle.IsOn = inlineAiSettings.EcoMode;
@@ -304,6 +401,12 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
 
             var configured = aiSettingsStore.IsConfigured(inlineAiSettings);
             UpdateInlineAiState(configured);
+            InlineDetectStatus.Text = configured
+                ? $"已配置 · {AiProviderDetector.DescribeProvider(inlineAiSettings.Provider, inlineAiSettings.BaseUrl)}，粘贴新 Key 可重新识别"
+                : "粘贴 API Key 后自动识别服务商与模型";
+            // 旧配置有 BaseUrl 但缺 Key/模型时，直接展开手动区，便于补齐。
+            InlineManualExpander.IsExpanded = !configured && !string.IsNullOrWhiteSpace(inlineAiSettings.BaseUrl);
+
             if (expandWhenUnconfigured && !configured)
                 SetInlineAiPanelVisible(true);
 
@@ -312,7 +415,8 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
 
         private void UpdateInlineAiState(bool configured)
         {
-            InlineAiStatus.Text = configured ? "AI 服务：已配置 · 自己的 API Key" : "AI 服务：未配置";
+            var label = AiProviderDetector.DescribeProvider(inlineAiSettings?.Provider, inlineAiSettings?.BaseUrl);
+            InlineAiStatus.Text = configured ? $"AI 服务：已配置 · {label}" : "AI 服务：未配置";
             InlineAiKeyState.Text = configured ? "已配置" : "未配置";
         }
 
@@ -327,29 +431,172 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
             SetInlineAiPanelVisible(InlineAiPanel.Visibility != Visibility.Visible);
         }
 
-        private void InlineAiSaveButton_Click(object sender, RoutedEventArgs e)
+        private void InlineModelCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
+            if (suppressInlineModelSelection)
+                return;
+            if (InlineModelCombo.SelectedItem is string model)
+                InlineModelBox.Text = model;
+        }
+
+        private async void InlineDetectButton_Click(object sender, RoutedEventArgs e)
+        {
+            await DetectInlineAiAsync();
+        }
+
+        private async void InlineAiSaveButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (isDetectingAi)
+                return;
+
+            inlineAiSettings ??= aiSettingsStore.Load(applyEnvironmentOverrides: false);
+            var newKey = InlineApiKeyBox.Password?.Trim() ?? string.Empty;
+
+            // 手动区展开表示用户明确要手填，此时以手填内容为准。
+            if (InlineManualExpander.IsExpanded)
+            {
+                SaveInlineAiManually(newKey);
+                return;
+            }
+
+            // 有新 Key 时优先自动识别；识别失败会自动展开手动区并给出提示。
+            if (!string.IsNullOrEmpty(newKey))
+            {
+                await DetectInlineAiAsync();
+                return;
+            }
+
             var baseUrl = InlineBaseUrlBox.Text.Trim();
-            if (baseUrl.Length > 0 &&
-                (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var parsed) ||
-                 (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps)))
+            var model = (InlineModelCombo.SelectedItem as string) ?? InlineModelBox.Text.Trim();
+            if (string.IsNullOrEmpty(baseUrl) || string.IsNullOrEmpty(model))
+            {
+                ShowStatus(InfoBarSeverity.Warning, "请粘贴 API Key 并保存以自动识别；识别失败时可展开「手动配置」填写。");
+                InlineApiKeyBox.Focus(FocusState.Programmatic);
+                return;
+            }
+
+            if (PersistInlineAiSettings(baseUrl, model, null, null))
+            {
+                var configured = aiSettingsStore.IsConfigured(inlineAiSettings);
+                ShowStatus(configured ? InfoBarSeverity.Success : InfoBarSeverity.Warning,
+                    configured ? "模型已更新，下一次生成立即生效。" : "已保存，但还缺少 API Key，请粘贴后保存以完成配置。");
+            }
+        }
+
+        /// <summary>
+        /// 仅凭 Key（新填或已保存）识别服务商与可用模型，成功后回填并落盘。
+        /// </summary>
+        private async Task DetectInlineAiAsync()
+        {
+            var newKey = InlineApiKeyBox.Password?.Trim() ?? string.Empty;
+            inlineAiSettings ??= aiSettingsStore.Load(applyEnvironmentOverrides: false);
+            var key = !string.IsNullOrEmpty(newKey) ? newKey : aiSettingsStore.GetApiKey(inlineAiSettings);
+            if (string.IsNullOrEmpty(key))
+            {
+                ShowStatus(InfoBarSeverity.Error, "请先粘贴 API Key。");
+                InlineApiKeyBox.Focus(FocusState.Programmatic);
+                return;
+            }
+
+            SetInlineDetecting(true);
+            InlineDetectStatus.Text = "正在识别服务商…";
+            try
+            {
+                var detection = await aiProviderDetector.DetectAsync(key);
+                if (!detection.IsSuccess)
+                {
+                    InlineDetectStatus.Text = "未能自动识别，请在下方手动填写";
+                    InlineManualExpander.IsExpanded = true;
+                    if (string.IsNullOrEmpty(InlineBaseUrlBox.Text) && !string.IsNullOrEmpty(inlineAiSettings.BaseUrl))
+                        InlineBaseUrlBox.Text = inlineAiSettings.BaseUrl;
+                    if (string.IsNullOrEmpty(InlineModelBox.Text) && !string.IsNullOrEmpty(inlineAiSettings.Model))
+                        InlineModelBox.Text = inlineAiSettings.Model;
+                    ShowStatus(InfoBarSeverity.Warning, detection.ErrorMessage);
+                    return;
+                }
+
+                ApplyDetectedModels(detection);
+                InlineBaseUrlBox.Text = detection.BaseUrl;
+                InlineModelBox.Text = detection.SelectedModel;
+                InlineManualExpander.IsExpanded = false;
+
+                if (PersistInlineAiSettings(detection.BaseUrl, detection.SelectedModel, newKey, detection.Provider))
+                {
+                    InlineDetectStatus.Text = $"已识别：{detection.DisplayName} · 可用模型 {detection.Models.Count} 个";
+                    ShowStatus(InfoBarSeverity.Success,
+                        $"已识别服务商 {detection.DisplayName}，已自动选择模型 {detection.SelectedModel}；可在模型下拉框中更换。");
+                }
+            }
+            catch (Exception ex)
+            {
+                InlineDetectStatus.Text = "识别失败，可手动配置";
+                InlineManualExpander.IsExpanded = true;
+                ShowStatus(InfoBarSeverity.Error, $"自动识别失败：{ex.Message}");
+            }
+            finally
+            {
+                SetInlineDetecting(false);
+            }
+        }
+
+        private void ApplyDetectedModels(AiProviderDetection detection)
+        {
+            suppressInlineModelSelection = true;
+            InlineModelCombo.Items.Clear();
+            foreach (var model in detection.Models)
+                InlineModelCombo.Items.Add(model);
+            InlineModelCombo.SelectedIndex = detection.Models.Count > 0 ? 0 : -1;
+            InlineModelCombo.IsEnabled = detection.Models.Count > 0;
+            suppressInlineModelSelection = false;
+        }
+
+        private void SetInlineDetecting(bool detecting)
+        {
+            isDetectingAi = detecting;
+            InlineDetectButton.IsEnabled = !detecting;
+            InlineAiSaveButton.IsEnabled = !detecting;
+            InlineApiKeyBox.IsEnabled = !detecting;
+            InlineModelCombo.IsEnabled = !detecting && InlineModelCombo.Items.Count > 0;
+            InlineDetectRing.IsActive = detecting;
+            InlineDetectRing.Visibility = detecting ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        /// <summary>
+        /// 从 Core 读取「允许壁纸访问外部网络」开关；读取失败按默认关闭处理，不阻塞生成。
+        /// </summary>
+        private bool ReadAllowExternalNetwork()
+        {
+            try
+            {
+                userSettings.Load<Lively.Models.SettingsModel>();
+                return userSettings.Settings?.AllowExternalNetwork ?? false;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        private bool PersistInlineAiSettings(string baseUrl, string model, string newKey, string providerId)
+        {
+            if (!AiProviderDetector.IsValidBaseUrl(baseUrl))
             {
                 ShowStatus(InfoBarSeverity.Error, "BaseUrl 需要是 http/https 的完整地址。");
-                return;
+                return false;
             }
 
             try
             {
                 inlineAiSettings ??= aiSettingsStore.Load(applyEnvironmentOverrides: false);
-                inlineAiSettings.BaseUrl = baseUrl;
-                inlineAiSettings.Model = InlineModelBox.Text.Trim();
-                if (string.IsNullOrWhiteSpace(inlineAiSettings.Provider))
+                if (!string.IsNullOrWhiteSpace(providerId))
+                    inlineAiSettings.Provider = providerId;
+                else if (string.IsNullOrWhiteSpace(inlineAiSettings.Provider))
                     inlineAiSettings.Provider = "openai-compatible";
-
-                var newKey = InlineApiKeyBox.Password;
+                inlineAiSettings.BaseUrl = baseUrl;
+                inlineAiSettings.Model = model;
+                inlineAiSettings.VisionModel = InlineVisionModelBox.Text.Trim();
                 if (!string.IsNullOrWhiteSpace(newKey))
-                    aiSettingsStore.SetApiKey(inlineAiSettings, newKey.Trim());
-
+                    aiSettingsStore.SetApiKey(inlineAiSettings, newKey);
                 aiSettingsStore.Save(inlineAiSettings);
                 InlineApiKeyBox.Password = string.Empty;
 
@@ -357,14 +604,31 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
                 UpdateInlineAiState(configured);
                 if (configured)
                     ErrorBar.IsOpen = false;
-
-                ShowStatus(InfoBarSeverity.Success, configured
-                    ? "AI 配置已保存，下一次生成立即生效。"
-                    : "已保存，但配置仍不完整：请填写 BaseUrl、模型和 API Key。");
+                return true;
             }
             catch (Exception ex)
             {
                 ShowStatus(InfoBarSeverity.Error, $"保存 AI 配置失败：{ex.Message}");
+                return false;
+            }
+        }
+
+        private void SaveInlineAiManually(string newKey)
+        {
+            var baseUrl = InlineBaseUrlBox.Text.Trim();
+            var model = InlineModelBox.Text.Trim();
+            inlineAiSettings ??= aiSettingsStore.Load(applyEnvironmentOverrides: false);
+            var key = !string.IsNullOrWhiteSpace(newKey) ? newKey : aiSettingsStore.GetApiKey(inlineAiSettings);
+            if (string.IsNullOrEmpty(baseUrl) || string.IsNullOrEmpty(model) || string.IsNullOrEmpty(key))
+            {
+                ShowStatus(InfoBarSeverity.Error, "手动配置需要同时填写 BaseUrl、模型和 API Key。");
+                return;
+            }
+
+            if (PersistInlineAiSettings(baseUrl, model, newKey, null))
+            {
+                InlineDetectStatus.Text = $"已手动配置 · {AiProviderDetector.DescribeProvider(inlineAiSettings.Provider, baseUrl)}";
+                ShowStatus(InfoBarSeverity.Success, "AI 配置已保存，下一次生成立即生效。");
             }
         }
 
@@ -377,6 +641,7 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
                 aiSettingsStore.Save(inlineAiSettings);
                 InlineApiKeyBox.Password = string.Empty;
                 UpdateInlineAiState(aiSettingsStore.IsConfigured(inlineAiSettings));
+                InlineDetectStatus.Text = "粘贴 API Key 后自动识别服务商与模型";
                 ShowStatus(InfoBarSeverity.Success, "已清除本机保存的 API Key。");
             }
             catch (Exception ex)
@@ -432,6 +697,62 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
 
         #region 生成
 
+        private async void AddGenerateImageButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (isGenerating || isBusy || isRevising)
+                return;
+
+            try
+            {
+                var files = await fileService.PickFileAsync(new (string, string[])[]
+                {
+                    ("图片", new[] { ".jpg", ".jpeg", ".png", ".webp", ".gif" }),
+                });
+                var path = files?.FirstOrDefault();
+                if (string.IsNullOrWhiteSpace(path))
+                    return;
+
+                var info = new FileInfo(path);
+                if (!info.Exists)
+                {
+                    ShowStatus(InfoBarSeverity.Warning, "找不到选择的图片，请重新选择。");
+                    return;
+                }
+                if (info.Length > 10 * 1024 * 1024)
+                {
+                    ShowStatus(InfoBarSeverity.Warning, "图片超过 10 MB，请压缩后再选择。");
+                    return;
+                }
+
+                SetGenerateAttachment(path);
+            }
+            catch (Exception ex)
+            {
+                ShowStatus(InfoBarSeverity.Error, $"选择图片失败：{ex.Message}");
+            }
+        }
+
+        private void RemoveGenerateAttachmentButton_Click(object sender, RoutedEventArgs e)
+        {
+            ClearGenerateAttachment();
+        }
+
+        private void SetGenerateAttachment(string path)
+        {
+            selectedGenerateImagePath = path;
+            GenerateAttachmentImage.Source = LoadBitmap(path, 240);
+            GenerateAttachmentName.Text = Path.GetFileName(path);
+            GenerateAttachmentPanel.Visibility = Visibility.Visible;
+        }
+
+        private void ClearGenerateAttachment()
+        {
+            selectedGenerateImagePath = null;
+            GenerateAttachmentImage.Source = null;
+            GenerateAttachmentName.Text = string.Empty;
+            GenerateAttachmentPanel.Visibility = Visibility.Collapsed;
+        }
+
         private async void GenerateButton_Click(object sender, RoutedEventArgs e)
         {
             if (isGenerating || isBusy || isRevising)
@@ -440,7 +761,19 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
             var prompt = PromptBox.Text?.Trim();
             if (string.IsNullOrWhiteSpace(prompt))
             {
-                ShowError("请先写一句描述，例如“深空里的黑洞，吸积盘缓慢旋转”。", false);
+                if (string.IsNullOrWhiteSpace(selectedGenerateImagePath))
+                {
+                    ShowError("请先写一句描述，例如“深空里的黑洞，吸积盘缓慢旋转”。", false);
+                    return;
+                }
+                prompt = "参考这张图片的视觉风格生成壁纸";
+            }
+
+            if (!string.IsNullOrWhiteSpace(selectedGenerateImagePath) &&
+                !File.Exists(selectedGenerateImagePath))
+            {
+                ClearGenerateAttachment();
+                ShowError("参考图片已被移动或删除，请重新选择。", false);
                 return;
             }
 
@@ -448,7 +781,7 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
             if (!aiSettingsStore.IsConfigured(settings))
             {
                 SetInlineAiPanelVisible(true);
-                ShowError("尚未配置 AI 服务：请在生成按钮下方填写 BaseUrl、Model 和 API Key。", true);
+                ShowError("尚未配置 AI 服务：请在下方粘贴 API Key 并保存，应用会自动识别服务商与模型。", true);
                 return;
             }
 
@@ -486,6 +819,8 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
                 Color = selectedColorHex,
                 OutputPath = outputPath,
                 Eco = EcoToggle.IsOn,
+                ImagePath = selectedGenerateImagePath,
+                AllowExternalNetwork = ReadAllowExternalNetwork(),
             };
 
             AiGenerationResult result;
@@ -548,6 +883,7 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
             GenerateStatus.Text = "生成完成";
             await ShowResultAsync(item);
             await RefreshRecentAsync();
+            ClearGenerateAttachment();
             ShowStatus(InfoBarSeverity.Success, "生成完成，可以预览、保存到壁纸库或立即应用。");
         }
 
@@ -574,6 +910,8 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
             GenerateRing.Visibility = generating ? Visibility.Visible : Visibility.Collapsed;
             GenerateRing.IsActive = generating;
             PromptBox.IsEnabled = !generating;
+            AddGenerateImageButton.IsEnabled = !generating;
+            RemoveGenerateAttachmentButton.IsEnabled = !generating;
             StyleGrid.IsEnabled = !generating;
             foreach (var swatch in colorButtons.Values)
                 swatch.IsEnabled = !generating;
@@ -586,7 +924,8 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
                 text = text.Substring(0, 22) + "…";
             if (string.IsNullOrWhiteSpace(text))
                 text = "Contactable Wallpaper";
-            return $"{text} · {style.Name}";
+            // 未指定风格时不追加后缀，避免标题出现「不指定」。
+            return style.IsAuto ? text : $"{text} · {style.Name}";
         }
 
         private void DeleteProject(string projectFolder)
@@ -764,7 +1103,8 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
                 current = item;
                 ResultCard.Visibility = Visibility.Visible;
                 ResultTitle.Text = item.Title;
-                ResultPath.Text = $"文件：{item.HtmlPath}";
+                ResultPath.Text = $"草稿：{item.HtmlPath}";
+                UpdateLibraryPathLine(item);
                 ResultImage.Source = LoadBitmap(item.ThumbnailPath, 960);
                 ResultImage.Visibility = Visibility.Visible;
                 ResultWebView.Visibility = Visibility.Collapsed;
@@ -797,6 +1137,42 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
             catch (Exception ex)
             {
                 ShowStatus(InfoBarSeverity.Error, $"显示结果失败：{ex.Message}");
+            }
+        }
+
+        /// <summary>把“草稿在哪、壁纸库在哪”写清楚，避免用户去安装目录里找壁纸。</summary>
+        private void UpdateLibraryPathLine(GeneratedWallpaper item)
+        {
+            if (!string.IsNullOrWhiteSpace(item?.LibraryFolderPath) && Directory.Exists(item.LibraryFolderPath))
+            {
+                ResultLibraryPath.Text = $"壁纸库：{item.LibraryFolderPath}";
+                return;
+            }
+
+            ResultLibraryPath.Text = $"壁纸库：尚未入库，保存后位于 {wallpaperService.InstallRoot}";
+        }
+
+        private void UpdateStorageHints()
+        {
+            RecentLibraryHint.Text = $"保存后会进入壁纸库：{wallpaperService.InstallRoot}";
+        }
+
+        private void OpenLibraryFolder_Click(object sender, RoutedEventArgs e)
+        {
+            var target = wallpaperService.WallpaperRoot;
+            if (string.IsNullOrWhiteSpace(target) || !Directory.Exists(target))
+            {
+                ShowStatus(InfoBarSeverity.Warning, $"壁纸库目录不存在：{target}");
+                return;
+            }
+
+            try
+            {
+                Process.Start(new ProcessStartInfo { FileName = target, UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                ShowStatus(InfoBarSeverity.Error, $"打开目录失败：{ex.Message}");
             }
         }
 
@@ -857,6 +1233,11 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
             try
             {
                 var path = await EnsureInLibraryAsync(current);
+                if (current != null)
+                {
+                    current.LibraryFolderPath = path;
+                    UpdateLibraryPathLine(current);
+                }
                 ShowStatus(InfoBarSeverity.Success, $"已保存到壁纸库：{path}");
                 SaveToLibraryButton.IsEnabled = false;
                 ApplyButton.IsEnabled = true;
@@ -985,7 +1366,7 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
             var path = sessionStore.GetVersionPath(session.SessionId, latest.Version);
             if (File.Exists(path))
             {
-                ResultPath.Text = $"版本 v{latest.Version}：{path}";
+                ResultPath.Text = $"草稿 · 版本 v{latest.Version}：{path}";
                 return path;
             }
             return item.HtmlPath;
@@ -1004,6 +1385,7 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
             VersionRail.Children.Clear();
             DialogueList.ItemsSource = null;
             ReviseBox.Text = string.Empty;
+            ClearReviseAttachment();
             ReviseProgress.Value = 0;
             ReviseStatus.Text = "提交后会生成新版本，旧版本仍保留在版本走廊里。";
             ApplyVersionButton.IsEnabled = false;
@@ -1086,20 +1468,28 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
                 {
                     if (version.Version <= 1)
                     {
+                        var initialAttachmentPath = string.IsNullOrWhiteSpace(version.AttachmentFile)
+                            ? null
+                            : sessionStore.GetAttachmentPath(activeSession.SessionId, version.AttachmentFile);
                         turns.Add(new ConversationTurnVm
                         {
                             Caption = "v1 · 初始生成",
                             Body = string.IsNullOrWhiteSpace(activeSession.Prompt) ? "（没有记录初始提示词）" : activeSession.Prompt,
+                            Attachment = string.IsNullOrWhiteSpace(initialAttachmentPath) ? null : LoadBitmap(initialAttachmentPath, 240),
                         });
                         continue;
                     }
 
+                    var attachmentPath = string.IsNullOrWhiteSpace(version.AttachmentFile)
+                        ? null
+                        : sessionStore.GetAttachmentPath(activeSession.SessionId, version.AttachmentFile);
                     turns.Add(new ConversationTurnVm
                     {
                         Caption = version.Score.HasValue
                             ? $"v{version.Version} · 你的诉求 · 评分 {version.Score:0.#}/10"
                             : $"v{version.Version} · 你的诉求",
                         Body = string.IsNullOrWhiteSpace(version.Instruction) ? "（没有记录诉求）" : version.Instruction,
+                        Attachment = string.IsNullOrWhiteSpace(attachmentPath) ? null : LoadBitmap(attachmentPath, 240),
                     });
                     if (!string.IsNullOrWhiteSpace(version.Summary))
                     {
@@ -1140,7 +1530,7 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
 
             selectedVersion = version;
             UpdateVersionRailSelection();
-            ResultPath.Text = $"版本 v{version}：{path}";
+            ResultPath.Text = $"草稿 · 版本 v{version}：{path}";
             if (await EnsureWebViewAsync())
                 NavigateResultPreview(path);
         }
@@ -1154,10 +1544,68 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
             ReviseRing.IsActive = revising;
             ReviseRing.Visibility = revising ? Visibility.Visible : Visibility.Collapsed;
             ReviseBox.IsEnabled = !revising;
+            AddReviseImageButton.IsEnabled = !revising;
+            RemoveReviseAttachmentButton.IsEnabled = !revising;
             GenerateButton.IsEnabled = !revising;
             VersionRail.IsHitTestVisible = !revising;
             ApplyVersionButton.IsEnabled = !revising && activeSession != null;
             SaveVersionButton.IsEnabled = !revising && activeSession != null;
+        }
+
+        private async void AddReviseImageButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (isRevising || isBusy)
+                return;
+
+            try
+            {
+                var files = await fileService.PickFileAsync(new (string, string[])[]
+                {
+                    ("图片", new[] { ".jpg", ".jpeg", ".png", ".webp", ".gif" }),
+                });
+                var path = files?.FirstOrDefault();
+                if (string.IsNullOrWhiteSpace(path))
+                    return;
+
+                var info = new FileInfo(path);
+                if (!info.Exists)
+                {
+                    ShowStatus(InfoBarSeverity.Warning, "找不到选择的图片，请重新选择。");
+                    return;
+                }
+                if (info.Length > 10 * 1024 * 1024)
+                {
+                    ShowStatus(InfoBarSeverity.Warning, "图片超过 10 MB，请压缩后再选择。");
+                    return;
+                }
+
+                SetReviseAttachment(path);
+            }
+            catch (Exception ex)
+            {
+                ShowStatus(InfoBarSeverity.Error, $"选择图片失败：{ex.Message}");
+            }
+        }
+
+        private void RemoveReviseAttachmentButton_Click(object sender, RoutedEventArgs e)
+        {
+            ClearReviseAttachment();
+        }
+
+        private void SetReviseAttachment(string path)
+        {
+            selectedReviseImagePath = path;
+            ReviseAttachmentImage.Source = LoadBitmap(path, 320);
+            ReviseAttachmentName.Text = Path.GetFileName(path);
+            ReviseAttachmentPanel.Visibility = Visibility.Visible;
+        }
+
+        private void ClearReviseAttachment()
+        {
+            selectedReviseImagePath = null;
+            ReviseAttachmentImage.Source = null;
+            ReviseAttachmentName.Text = string.Empty;
+            ReviseAttachmentPanel.Visibility = Visibility.Collapsed;
         }
 
         private async void ReviseButton_Click(object sender, RoutedEventArgs e)
@@ -1174,7 +1622,19 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
             var instruction = ReviseBox.Text?.Trim();
             if (string.IsNullOrWhiteSpace(instruction))
             {
-                ShowStatus(InfoBarSeverity.Warning, "请先写一句修改诉求。");
+                if (string.IsNullOrWhiteSpace(selectedReviseImagePath))
+                {
+                    ShowStatus(InfoBarSeverity.Warning, "请先写一句修改诉求。");
+                    return;
+                }
+                instruction = "参考这张图片的视觉风格进行修改";
+            }
+
+            if (!string.IsNullOrWhiteSpace(selectedReviseImagePath) &&
+                !File.Exists(selectedReviseImagePath))
+            {
+                ClearReviseAttachment();
+                ShowStatus(InfoBarSeverity.Warning, "参考图片已被移动或删除，请重新选择。");
                 return;
             }
 
@@ -1182,7 +1642,7 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
             if (!aiSettingsStore.IsConfigured(settings))
             {
                 SetInlineAiPanelVisible(true);
-                ShowError("尚未配置 AI 服务：请在生成按钮下方填写 BaseUrl、Model 和 API Key。", true);
+                ShowError("尚未配置 AI 服务：请在下方粘贴 API Key 并保存，应用会自动识别服务商与模型。", true);
                 return;
             }
 
@@ -1205,6 +1665,8 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
                 SessionId = activeSession.SessionId,
                 Instruction = instruction,
                 Eco = EcoToggle.IsOn,
+                ImagePath = selectedReviseImagePath,
+                AllowExternalNetwork = ReadAllowExternalNetwork(),
             };
 
             AiRevisionResult result;
@@ -1266,12 +1728,13 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
             {
                 current.HtmlPath = versionPath;
                 current.SessionId = sessionId;
-                ResultPath.Text = $"版本 v{latest.Version}：{versionPath}";
+                ResultPath.Text = $"草稿 · 版本 v{latest.Version}：{versionPath}";
                 if (await EnsureWebViewAsync())
                     NavigateResultPreview(versionPath);
             }
 
             ReviseBox.Text = string.Empty;
+            ClearReviseAttachment();
             ReviseProgress.Value = 100;
             ReviseStatus.Text = latest.Score.HasValue
                 ? $"已生成 v{latest.Version} · 评分 {latest.Score:0.#}/10"
@@ -1357,6 +1820,11 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
             try
             {
                 var path = await EnsureInLibraryAsync(item);
+                if (current != null)
+                {
+                    current.LibraryFolderPath = path;
+                    UpdateLibraryPathLine(current);
+                }
                 ReviseStatus.Text = $"已保存 v{selectedVersion} 到壁纸库";
                 ShowStatus(InfoBarSeverity.Success, $"已将 v{selectedVersion} 保存到壁纸库：{path}");
                 await RefreshRecentAsync();

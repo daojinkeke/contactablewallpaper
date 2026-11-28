@@ -44,12 +44,6 @@ namespace Lively.ViewModels
         }
 
         [RelayCommand]
-        private void OpenHelp()
-        {
-            LinkUtil.OpenBrowser("https://github.com/rocksdanister/lively/wiki/Common-Problems");
-        }
-
-        [RelayCommand]
         private void ToggleGridOverlay()
         {
             IsGridOverlayVisible = !IsGridOverlayVisible;
@@ -64,7 +58,7 @@ namespace Lively.ViewModels
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Failed to generate log report:\n{ex.Message}", "Lively Wallpaper");
+                MessageBox.Show($"Failed to generate log report:\n{ex.Message}", "Contactable Wallpaper");
             }
         }
     }

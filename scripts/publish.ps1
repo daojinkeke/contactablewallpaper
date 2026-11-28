@@ -13,15 +13,18 @@
       * 安装器检测到系统缺 WebView2 时运行它，由微软组件在线安装；
       * 若确实需要零联网，可显式传 -WebView2RuntimeDirectory <固定版本运行时目录> 随包携带运行时。
 
-    两套工程的发布方式不同，脚本内部分开处理：
-      * Core / UI 是 net9.0-windows TFM，按 win-x64 + SelfContained=true 发布；
+    三类工程的发布方式不同，脚本内部分开处理：
+      * Core / AI CLI 是 net9.0-windows 控制台/窗口程序，按 win-x64 + SelfContained=true + 单文件发布
+        （PublishSingleFile，原生库随包自解压，压缩开启）。这样发布根目录只剩一个 Lively.exe，
+        不再平铺 300 个运行时 dll；AI CLI 同理只剩单个 exe；
+      * UI 是 WinUI3（WindowsAppSDK 自包含），不支持单文件发布，仍按目录发布；
       * 各 Player（WebView2/CefSharp/Wmf/Vlc）与 Watchdog 是 net472，只做 Release 构建后整目录复制，
         绝不传 -r / --self-contained（.NET Framework 不支持自包含，混用会直接失败）。
 
     发布目录结构与运行时代码（RunnerService / WebWebView2 / WatchdogProcess）的查找路径一致：
-      <Out>\Lively.exe
+      <Out>\Lively.exe                                              （单文件，内含 .NET 运行时）
       <Out>\plugins\UI\Lively.UI.WinUI.exe
-      <Out>\plugins\Ai\Lively.Ai.Cli.exe                            （新建壁纸页调用的生成 CLI）
+      <Out>\plugins\Ai\Lively.Ai.Cli.exe                            （单文件，新建壁纸页调用的生成 CLI）
       <Out>\plugins\webview2\Lively.Player.WebView2.exe
       <Out>\prereq\MicrosoftEdgeWebview2Setup.exe                   （WebView2 引导安装器，默认模式）
       <Out>\plugins\webview2\webview2-runtime\msedgewebview2.exe   （仅 -WebView2RuntimeDirectory 时随包）
@@ -209,6 +212,7 @@ function Find-WebView2RuntimeDirectory {
 Write-Host "== ContactableWallpaper publish (self-contained) ==" -ForegroundColor Cyan
 Write-Host "配置      : $configuration（发布一律 Release，Debug 播放器不可用）"
 Write-Host "运行时    : $Runtime（SelfContained=true, PublishReadyToRun=false）"
+Write-Host "打包形态  : Core / AI CLI 单文件（原生库自解压 + 压缩），UI 目录发布（WinUI3 不支持单文件）"
 Write-Host "输出目录  : $outputDir"
 Write-Host "可选播放器: $(if ($IncludeOptionalPlayers) { 'cef / wmf / libvlc 一并发布' } else { '不打包（-IncludeOptionalPlayers 可开启）' })"
 Write-Host "WebView2  : $(if ($WebView2RuntimeDirectory) { '随包携带固定版本' } elseif ($NoWebView2Runtime) { '不携带（依赖系统 Evergreen）' } else { '引导器模式（微软官方引导安装器，约 2 MB）' })"
@@ -228,16 +232,19 @@ New-Item -ItemType Directory -Force -Path $pluginDir | Out-Null
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
 # ---------------------------------------------------------------------------
-# 1. Core（net9.0-windows）：self-contained 发布到发布根目录
+# 1. Core（net9.0-windows）：self-contained 单文件发布到发布根目录
 # ---------------------------------------------------------------------------
 $coreStage = Join-Path $stagingRoot 'core'
-Invoke-Dotnet -Title '发布 Core (Lively.csproj, self-contained)' -Arguments @(
+Invoke-Dotnet -Title '发布 Core (Lively.csproj, self-contained 单文件)' -Arguments @(
     'publish', (Resolve-RepoPath 'Lively\Lively.csproj'),
     '-c', $configuration,
     '-r', $Runtime,
     '--self-contained', 'true',
     "-p:Platform=$platform",
-    '-p:PublishSingleFile=false',
+    '-p:PublishSingleFile=true',
+    '-p:IncludeNativeLibrariesForSelfExtract=true',
+    '-p:EnableCompressionInSingleFile=true',
+    '-p:TrimSingleFileBundle=true',
     '-p:PublishTrimmed=false',
     '-p:PublishReadyToRun=false',
     '-o', $coreStage
@@ -268,13 +275,16 @@ $uiCopy = Copy-Tree -Source $uiStage -Destination (Join-Path $pluginDir 'UI')
 #     UI 的“新建壁纸”页按 <UI>\..\Ai\Lively.Ai.Cli.exe 查找生成器
 # ---------------------------------------------------------------------------
 $aiStage = Join-Path $stagingRoot 'ai'
-Invoke-Dotnet -Title '发布 AI CLI (Lively.Ai.Cli.csproj, self-contained)' -Arguments @(
+Invoke-Dotnet -Title '发布 AI CLI (Lively.Ai.Cli.csproj, self-contained 单文件)' -Arguments @(
     'publish', (Resolve-RepoPath 'Lively.Ai.Cli\Lively.Ai.Cli.csproj'),
     '-c', $configuration,
     '-r', $Runtime,
     '--self-contained', 'true',
     "-p:Platform=$platform",
-    '-p:PublishSingleFile=false',
+    '-p:PublishSingleFile=true',
+    '-p:IncludeNativeLibrariesForSelfExtract=true',
+    '-p:EnableCompressionInSingleFile=true',
+    '-p:TrimSingleFileBundle=true',
     '-p:PublishTrimmed=false',
     '-p:PublishReadyToRun=false',
     '-o', $aiStage
@@ -450,6 +460,33 @@ if (-not $NoTrim) {
     # 7.2 XML 文档
     Remove-FilesWithStats -Root $outputDir -Filter '*.xml' -ItemName 'xml 文档'
 
+    # 7.2.1 ONNX Runtime 的导入库（*.lib）只在链接期用，运行时不需要
+    Remove-FilesWithStats -Root $outputDir -Filter '*.lib' -ItemName 'native 导入库(.lib)'
+
+    # 7.2.2 设计器 / 调试诊断程序集：运行时永不加载（单文件包内由 Directory.Build.targets 剔除，
+    #       这里是 UI、webview2 等目录发布形态的对应处理）
+    $unusedAssemblies = @(
+        'System.Windows.Forms.Design.dll',
+        'System.Windows.Forms.Design.Editors.dll',
+        'System.Windows.Forms.Design.resources.dll',
+        'System.Drawing.Design.dll',
+        'System.Design.dll',
+        'Microsoft.DiaSymReader.Native.amd64.dll',
+        'mscordaccore.dll',
+        'mscordbi.dll',
+        'createdump.exe')
+    $unusedPatterns = @($unusedAssemblies + 'mscordaccore_amd64_amd64_*.dll')
+    $unusedFiles = 0
+    $unusedBytes = 0
+    foreach ($pattern in $unusedPatterns) {
+        $items = Get-ChildItem $outputDir -Recurse -File -Filter $pattern -ErrorAction SilentlyContinue
+        if (-not $items) { continue }
+        $unusedFiles += $items.Count
+        $unusedBytes += ($items | Measure-Object -Property Length -Sum).Sum
+        foreach ($item in $items) { Remove-Item -LiteralPath $item.FullName -Force -ErrorAction SilentlyContinue }
+    }
+    Add-TrimReport -Item '设计器/诊断程序集' -Files $unusedFiles -Bytes $unusedBytes
+
     # 7.3 卫星资源目录（非 zh/en 全部裁掉）
     $allCultureNames = [System.Globalization.CultureInfo]::GetCultures(
         [System.Globalization.CultureTypes]::AllCultures) | ForEach-Object { $_.Name }
@@ -536,18 +573,25 @@ if ($missing.Count -gt 0) {
     throw "发布产物缺少关键入口：`n  $($missing -join "`n  ")"
 }
 
-# 自包含校验：.NET 9 应用必须带 hostfxr/hostpolicy 与 coreclr
-$selfContainedMarkers = @('hostfxr.dll', 'hostpolicy.dll', 'coreclr.dll')
-$selfContainedRoots = [ordered]@{
-    'Core'   = $outputDir
-    'UI'     = Join-Path $pluginDir 'UI'
-    'AI CLI' = Join-Path $pluginDir 'Ai'
+# 单文件校验：Core / AI CLI 的 .NET 运行时已打进 exe，目录里不应再出现主程序 dll 或运行时 dll
+$singleFileRoots = [ordered]@{
+    'Core'   = @{ Dir = $outputDir; HostDll = 'Lively.dll' }
+    'AI CLI' = @{ Dir = (Join-Path $pluginDir 'Ai'); HostDll = 'Lively.Ai.Cli.dll' }
 }
-foreach ($root in $selfContainedRoots.GetEnumerator()) {
-    $missingMarkers = $selfContainedMarkers | Where-Object { -not (Test-Path (Join-Path $root.Value $_)) }
-    if ($missingMarkers) {
-        throw "$($root.Key) 不是 self-contained（缺少 $($missingMarkers -join ', ')）：$($root.Value)"
+foreach ($entry in $singleFileRoots.GetEnumerator()) {
+    $leftovers = @($entry.Value.HostDll, 'coreclr.dll', 'hostfxr.dll') |
+        Where-Object { Test-Path (Join-Path $entry.Value.Dir $_) }
+    if ($leftovers) {
+        throw "$($entry.Key) 不是单文件发布（仍存在 $($leftovers -join ', ')）：$($entry.Value.Dir)"
     }
+}
+
+# 自包含校验：UI 仍为目录发布，必须带 hostfxr/hostpolicy 与 coreclr
+$selfContainedMarkers = @('hostfxr.dll', 'hostpolicy.dll', 'coreclr.dll')
+$uiRoot = Join-Path $pluginDir 'UI'
+$missingMarkers = $selfContainedMarkers | Where-Object { -not (Test-Path (Join-Path $uiRoot $_)) }
+if ($missingMarkers) {
+    throw "UI 不是 self-contained（缺少 $($missingMarkers -join ', ')）：$uiRoot"
 }
 
 # ---------------------------------------------------------------------------

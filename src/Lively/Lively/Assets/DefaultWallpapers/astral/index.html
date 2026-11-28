@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+﻿﻿<!DOCTYPE html>
 <html lang="zh-CN">
 
 <head>
@@ -161,19 +161,6 @@
       color: rgba(165, 188, 228, .5);
     }
 
-    .hint {
-      margin-top: 26px;
-      font-size: 10.5px;
-      letter-spacing: .12em;
-      line-height: 1.9;
-      color: rgba(148, 174, 218, .38);
-    }
-
-    .hint em {
-      font-style: normal;
-      color: rgba(198, 218, 250, .72);
-    }
-
     @media (orientation: portrait) {
       .hud {
         padding: min(7vh, 72px) min(8vw, 76px);
@@ -187,10 +174,6 @@
         letter-spacing: .2em;
       }
 
-      .hint {
-        max-width: 88%;
-      }
-
       .vignette {
         background:
           radial-gradient(140% 78% at 50% 40%, rgba(0, 0, 0, 0) 30%, rgba(0, 0, 0, .2) 66%, rgba(0, 0, 0, .62) 100%),
@@ -199,10 +182,6 @@
     }
 
     @media (max-width: 640px) {
-      .hint {
-        display: none;
-      }
-
       .stats {
         letter-spacing: .08em;
         font-size: 9.5px;
@@ -228,10 +207,6 @@
     <div class="bottom">
       <div class="clock" id="clock">--:--</div>
       <div class="date" id="date"></div>
-      <div class="hint">
-        <em>拖动</em> 搅动星尘 · <em>悬停环带</em> 点亮光弧 · <em>点击</em> 环面涟漪 · <em>双击环带</em> 环爆 · <em>滚轮</em> 调节引力 · <em>1 2 3</em>
-        星环/星云/螺旋 · <em>空格</em> 聚散 · <em>H</em> 隐藏界面
-      </div>
     </div>
   </div>
 

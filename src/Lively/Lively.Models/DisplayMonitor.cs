@@ -89,7 +89,19 @@ namespace Lively.Models
 
         public bool Equals(DisplayMonitor other)
         {
-            return other.DeviceId == this.DeviceId;
+            if (other is null)
+                return false;
+
+            if (ReferenceEquals(this, other))
+                return true;
+
+            // DeviceId 是主键（同一会话内由 DisplayManager 保证唯一）。
+            if (!string.IsNullOrEmpty(DeviceId) && !string.IsNullOrEmpty(other.DeviceId))
+                return string.Equals(DeviceId, other.DeviceId, StringComparison.OrdinalIgnoreCase);
+
+            // 任一方缺少 DeviceId 时退回设备名，避免空 ID 被判定为“同一块屏”。
+            return !string.IsNullOrEmpty(DeviceName) &&
+                   string.Equals(DeviceName, other.DeviceName, StringComparison.OrdinalIgnoreCase);
         }
     }
 }

@@ -62,7 +62,7 @@ if (-not $Version) {
         $Version = $versionMatch.Matches[0].Groups[1].Value
     }
     else {
-        $Version = '2.2.1.5'
+        $Version = '2.2.1.10'
     }
 }
 

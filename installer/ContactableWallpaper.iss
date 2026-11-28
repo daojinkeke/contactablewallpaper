@@ -10,7 +10,7 @@
 ;     安装时检测注册表 pv，缺失则提示并在线安装微软组件（需要联网）。
 
 #ifndef MyAppVersion
-  #define MyAppVersion "2.2.1.5"
+  #define MyAppVersion "2.2.1.10"
 #endif
 
 #ifndef SourceDir
@@ -84,6 +84,16 @@ Type: filesandordirs; Name: "{app}\plugins\cef"
 Type: filesandordirs; Name: "{app}\plugins\libvlc"
 Type: filesandordirs; Name: "{app}\plugins\wmf"
 Type: filesandordirs; Name: "{app}\plugins\webview2\webview2-runtime"
+; Core 与 AI CLI 改为单文件发布后，旧版平铺在根目录的运行时 dll、旧版 AI CLI 目录必须清掉，
+; 否则升级后会残留 300+ 个无效 dll（100 MB 以上）。{app}\*.dll 只作用于根目录，不进子目录。
+Type: files; Name: "{app}\*.dll"
+Type: files; Name: "{app}\*.pdb"
+Type: files; Name: "{app}\Lively.deps.json"
+Type: files; Name: "{app}\Lively.runtimeconfig.json"
+Type: filesandordirs; Name: "{app}\zh-CN"
+Type: filesandordirs; Name: "{app}\zh-Hans"
+Type: filesandordirs; Name: "{app}\zh-Hant"
+Type: filesandordirs; Name: "{app}\plugins\Ai"
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

@@ -1,8 +1,10 @@
 using Lively.Common.Helpers.Pinvoke;
 using Lively.Common.Services;
+using Lively.Core.Wallpapers;
 using Lively.Models;
 using Lively.Models.Enums;
 using Lively.Models.Interaction;
+using Lively.Models.Message;
 using System;
 using System.Drawing;
 using System.Threading;
@@ -247,7 +249,21 @@ namespace Lively.Core.Interaction
                     return;
                 }
 
-                injector.Key(handle, virtualKey, scanCode, isDown, isSystemKey);
+                // WebView2 的输入窗口属于 Chromium 运行时进程且不是前台活动窗口，
+                // 投递到该窗口的 WM_KEYDOWN 不会产生 DOM 键盘事件（实测页面零 keydown）。
+                // 因此 WebView2 壁纸改由 Player 桥接脚本合成 DOM 事件；其余播放器保留窗口消息注入。
+                if (wallpaper is WebWebView2)
+                {
+                    wallpaper.SendMessage(new LivelyKeyboardInput()
+                    {
+                        VirtualKey = virtualKey,
+                        IsDown = isDown
+                    });
+                }
+                else
+                {
+                    injector.Key(handle, virtualKey, scanCode, isDown, isSystemKey);
+                }
                 LogFirst(ref loggedKey, $"key(0x{virtualKey:X}) down={isDown}", handle);
             }
             catch (Exception ex)

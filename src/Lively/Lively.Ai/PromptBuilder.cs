@@ -16,8 +16,10 @@ namespace Lively.Ai
             "Return exactly one self-contained HTML document and nothing else (no markdown fences, no explanations).\n" +
             "Hard requirements:\n" +
             "1. Single file: all CSS in <style> and all JavaScript in <script>. Entry file is index.html.\n" +
-            "2. No external resources at all: no http(s) URLs in src/href/url()/@import, no external fonts, images, scripts or styles. " +
-            "Use inline SVG, CSS gradients, canvas or data: URIs only.\n" +
+            "2. Network policy follows the user message: by default no external resources at all (no http(s) URLs in " +
+            "src/href/url()/@import, no external fonts, images, scripts or styles; use inline SVG, CSS gradients, canvas " +
+            "or data: URIs only). If the user message explicitly says external network is allowed, you may use HTTPS " +
+            "resources and fetch() only as described there, and must degrade gracefully when offline.\n" +
             "3. No absolute paths and no file:/// references.\n" +
             "4. Forbidden APIs: alert/confirm/prompt, window.open, location.href/location.replace, target=\"_blank\", " +
             "navigation or downloads; getUserMedia/getDisplayMedia/navigator.mediaDevices; geolocation; Notification; " +
@@ -27,14 +29,13 @@ namespace Lively.Ai
             "use 100vw/100vh or fixed inset:0 canvases, recompute layout on window resize, never fix the page to a hard-coded pixel size " +
             "and never rely on the pointer position to reveal the scene.\n" +
             "7. Keep it lightweight enough for a wallpaper: target <= 60 FPS, avoid runaway timers and memory growth.\n" +
-            "8. Interaction must be real code, not a promise: register native DOM listeners (pointermove/pointerdown/keydown) " +
-            "and drive the visuals from them as described in the user message. Do NOT implement a proprietary handshake and do NOT " +
-            "listen for Lively APIs; the host injects a bridge. Always reset interaction state on pointerleave/blur, and never let " +
-            "interaction freeze or replace the idle animation.\n" +
+            "8. Interaction is optional: only add pointer/click/keyboard feedback when it genuinely fits the theme and " +
+            "improves the scene. If you add it, use real native DOM listeners, reset state on pointerleave/blur, and never " +
+            "let it freeze or replace the idle animation. Do not add generic mouse ripples or click bursts just to satisfy " +
+            "a checklist; if interaction does not fit, omit it entirely. Do NOT implement a proprietary handshake and do NOT " +
+            "listen for Lively APIs; the host injects a bridge.\n" +
             "9. Output must be a complete document starting with <!DOCTYPE html> and ending with </html>.";
 
-        private const string InteractionScaffoldResource = "Lively.Ai.References.interaction-scaffold.js.txt";
-        private static readonly string? InteractionScaffold = LoadEmbeddedText(InteractionScaffoldResource);
 
         /// <summary>
         /// 节能模式约束：只描述行为，不给具体数值，避免不同模型照抄参数导致效果僵硬。
@@ -52,7 +53,30 @@ namespace Lively.Ai
             "- Choose your own idle detection, throttling and easing approach; do not copy fixed numbers or hard-code values " +
             "that came from this instruction. Keep it native browser code with no external resources and no forbidden APIs.\n" +
             "- Eco behavior only adjusts timing and effect budget. It must not weaken the user's description: keep the " +
-            "composition, theme, palette and style exactly as requested, and keep the existing interaction behavior intact.";
+            "composition, theme, palette and style exactly as requested, and if the page chose to add interaction, keep it intact.";
+
+        /// <summary>
+        /// 宿主注入的数据契约：页面脚本执行前 window.contactableEnv 已存在，页面只读、自己不发请求。
+        /// 天/时间由宿主取数，因此页面即使在离线校验下也能显示真实天气与时钟。
+        /// </summary>
+        private const string HostEnvironmentSpec =
+            "Host data (window.contactableEnv is ALREADY defined before your script runs — read it, never request it):\n" +
+            "window.contactableEnv = {\n" +
+            "  time: { iso, hour, minute, dayOfWeek, isDay, timezoneOffsetMinutes },\n" +
+            "  weather: null | { condition, conditionCode, temperatureC, windKph, humidity, isDay, updatedAt },\n" +
+            "  allowExternalNetwork (boolean set by the host)\n" +
+            "}\n" +
+            "- Take the initial time/day-night state from window.contactableEnv.time (hour, minute, isDay, dayOfWeek); " +
+            "if it is missing, fall back to new Date(). Keep the displayed clock advancing from new Date() so it never " +
+            "freezes while the wallpaper runs.\n" +
+            "- Take sky/weather from window.contactableEnv.weather (condition/conditionCode, temperatureC, windKph, " +
+            "humidity, isDay). When it is null the host could not get any data: fall back to the local clock plus a " +
+            "neutral default sky and keep rendering — never wait for weather, never block the first frame.\n" +
+            "- The host refreshes weather after the page has loaded: also listen for the host event and re-apply the " +
+            "new values in place (addEventListener('contactable:env', e => apply(e.detail || window.contactableEnv))) " +
+            "without rebuilding the scene or restarting the animation.\n" +
+            "- Never fetch/XHR/WebSocket any weather or time API, and never use navigator.geolocation; the host owns " +
+            "that data and injects it.";
 
         /// <summary>
         /// Self-Refine 评审指令：只打分和列问题，不重写页面，输出严格 JSON。
@@ -62,9 +86,9 @@ namespace Lively.Ai
             "You are a ruthless senior art director reviewing a generated desktop live wallpaper. You also act as the planner " +
             "of an incremental edit (ReAct: reason first, then the rewrite follows).\n" +
             "Score it honestly on a 1-10 scale (10 = portfolio quality). Be strict: most first drafts are 5-7.\n" +
-            "Judge five dimensions: composition, color, motion, theme, interaction.\n" +
+            "Judge four visual dimensions: composition, color, motion, theme. Do not score interaction.\n" +
             "Return ONLY a JSON object, no markdown fences and no prose, using exactly this shape:\n" +
-            "{\"composition\":n,\"color\":n,\"motion\":n,\"theme\":n,\"interaction\":n,\"overall\":n," +
+            "{\"composition\":n,\"color\":n,\"motion\":n,\"theme\":n,\"overall\":n," +
             "\"plan\":[\"...\"],\"rationale\":\"...\",\"issues\":[\"...\"],\"fixes\":[\"...\"]}\n" +
             "Rules: overall must reflect the whole piece, not the average; plan must contain 2-4 short, concrete edit steps " +
             "(which parts to change and why); rationale is one sentence; issues must be concrete visual or code defects " +
@@ -82,12 +106,19 @@ namespace Lively.Ai
             sb.AppendLine("Target viewport: " + request.TargetWidth + "x" + request.TargetHeight +
                           " CSS px at DPI scale " + request.DpiScale.ToString("0.##", CultureInfo.InvariantCulture) +
                           ". It must still be responsive to other resolutions.");
-            sb.AppendLine("Style preset: " + request.Style);
+            if (request.Style == StylePreset.auto)
+                sb.AppendLine("Style: not specified — choose the visual style and palette that best fit the user's description.");
+            else if (request.Style == StylePreset.custom)
+                sb.AppendLine("Style: custom — follow the user's description literally, do not apply a named preset.");
+            else
+                sb.AppendLine("Style preset: " + request.Style);
             if (!string.IsNullOrWhiteSpace(request.PrimaryColor))
                 sb.AppendLine("Primary color: " + request.PrimaryColor);
-            sb.AppendLine("Interaction requested: " + DescribeInteraction(request.Interaction));
-            AppendInteractionSpec(sb, request.Interaction);
+            else
+                sb.AppendLine("Primary color: not specified — derive it from the description.");
+            AppendInteractionPreference(sb, request.Interaction);
             AppendReference(sb, request);
+            AppendReferenceImage(sb, request.ReferenceImageDescription);
             sb.AppendLine("Performance preference: " + request.PerformanceMode +
                           (request.PerformanceMode == PerformanceMode.saver
                               ? " (prefer CSS/compositor animation, avoid WebGL and heavy per-frame JavaScript)"
@@ -95,7 +126,8 @@ namespace Lively.Ai
                                   ? " (WebGL/particles allowed)"
                                   : " (balanced, WebGL only if clearly beneficial)"));
             AppendEcoSpec(sb, request);
-            sb.AppendLine("Offline required: yes. Absolutely no network requests.");
+            AppendHostEnvironmentSpec(sb);
+            AppendNetworkPolicy(sb, request);
             return sb.ToString();
         }
 
@@ -109,10 +141,13 @@ namespace Lively.Ai
                 sb.AppendLine("- [" + issue.Code + "] " + issue.Message);
             sb.AppendLine();
             sb.AppendLine("Original request: " + request.Prompt.Trim());
-            sb.AppendLine("Interaction requested: " + DescribeInteraction(request.Interaction));
-            AppendInteractionSpec(sb, request.Interaction);
+            AppendInteractionPreference(sb, request.Interaction);
             AppendReference(sb, request);
+            AppendReferenceImage(sb, request.ReferenceImageDescription);
             AppendEcoSpec(sb, request);
+            AppendHostEnvironmentSpec(sb);
+            AppendNetworkPolicy(sb, request);
+            AppendHardRequirementLine(sb, request);
             sb.AppendLine();
             sb.AppendLine("HTML to fix:");
             sb.AppendLine(previousHtml);
@@ -126,7 +161,8 @@ namespace Lively.Ai
             GenerationRequest request,
             string html,
             string revisionInstruction = null,
-            IReadOnlyList<string> historySummaries = null)
+            IReadOnlyList<string> historySummaries = null,
+            string referenceDescription = null)
         {
             var sb = new StringBuilder();
             sb.AppendLine("Review this desktop live wallpaper and return only the JSON object described in the system message.");
@@ -143,18 +179,23 @@ namespace Lively.Ai
                     foreach (var summary in historySummaries)
                         sb.AppendLine("- " + summary);
                 }
+                AppendReferenceImage(sb, referenceDescription);
             }
+            AppendReferenceImage(sb, request.ReferenceImageDescription);
             sb.AppendLine();
             sb.AppendLine("User description:");
             sb.AppendLine(request.Prompt.Trim());
             sb.AppendLine();
-            sb.AppendLine("Interaction requested: " + DescribeInteraction(request.Interaction));
+            AppendInteractionPreference(sb, request.Interaction);
             sb.AppendLine();
             sb.AppendLine("Context: the loop must look complete without any mouse movement, fill any resolution, " +
-                          "stay fully offline, and expose real DOM interaction.");
+                          (request.AllowExternalNetwork
+                              ? "stay within the allowed HTTPS data sources, "
+                              : "stay fully offline, ") +
+                          "and, only if the page chose to add interaction, expose real DOM interaction.");
             if (request.EcoMode)
                 sb.AppendLine("Eco mode is enabled: idle throttling is expected. Do not propose removing it; " +
-                              "check that interaction still restores full smoothness.");
+                              "if the page has interaction, check that it still restores full smoothness.");
             sb.AppendLine();
             sb.AppendLine("HTML:");
             sb.AppendLine(html);
@@ -198,13 +239,14 @@ namespace Lively.Ai
             }
             sb.AppendLine();
             sb.AppendLine("Original request: " + request.Prompt.Trim());
-            sb.AppendLine("Interaction requested: " + DescribeInteraction(request.Interaction));
-            AppendInteractionSpec(sb, request.Interaction);
+            AppendInteractionPreference(sb, request.Interaction);
             AppendReference(sb, request);
+            AppendReferenceImage(sb, request.ReferenceImageDescription);
             AppendEcoSpec(sb, request);
+            AppendHostEnvironmentSpec(sb);
+            AppendNetworkPolicy(sb, request);
             sb.AppendLine();
-            sb.AppendLine("Hard requirements unchanged: one self-contained HTML document, no external resources, " +
-                          "complete idle animation, responsive to any resolution.");
+            AppendHardRequirementLine(sb, request);
             sb.AppendLine("Keep the document compact: reuse the existing structure and make targeted improvements instead of " +
                           "inflating the code. The response must end with </html>; never leave the document truncated.");
             var sizeBudget = Math.Max(4096, (int)(previousHtml.Length * 1.1));
@@ -230,14 +272,16 @@ namespace Lively.Ai
             double score,
             IReadOnlyList<string> issues,
             IReadOnlyList<string> fixes,
-            IReadOnlyList<string> historySummaries)
+            IReadOnlyList<string> historySummaries,
+            string referenceDescription = null)
         {
             var sb = new StringBuilder();
             sb.AppendLine("Apply the user's revision to the CURRENT wallpaper below. This is an INCREMENTAL edit, not a rewrite.");
             sb.AppendLine("Preserve the existing composition, palette, scene structure and interaction unless the user explicitly " +
-                          "asks for a redo. Change only what the request and plan require.");
+                          "asks for a redo or asks to remove the interaction. Change only what the request and plan require.");
             sb.AppendLine();
             sb.AppendLine("User request: " + (instruction ?? string.Empty).Trim());
+            AppendReferenceImage(sb, referenceDescription);
             sb.AppendLine("Current art-director score: " + score.ToString("0.0", CultureInfo.InvariantCulture) + "/10");
             if (!string.IsNullOrWhiteSpace(plan))
             {
@@ -270,22 +314,213 @@ namespace Lively.Ai
             }
             sb.AppendLine();
             sb.AppendLine("Original request: " + request.Prompt.Trim());
-            sb.AppendLine("Interaction requested: " + DescribeInteraction(request.Interaction));
-            AppendInteractionSpec(sb, request.Interaction);
+            AppendInteractionPreference(sb, request.Interaction);
             AppendReference(sb, request);
             AppendEcoSpec(sb, request);
+            AppendHostEnvironmentSpec(sb);
+            AppendNetworkPolicy(sb, request);
             var sizeBudget = Math.Max(4096, (int)(previousHtml.Length * 1.1));
             sb.AppendLine();
             sb.AppendLine("Hard size budget: keep the result under " + sizeBudget.ToString("N0", CultureInfo.InvariantCulture) +
                           " characters (current is " + previousHtml.Length.ToString("N0", CultureInfo.InvariantCulture) +
                           "). Do not add new effect layers; edit the existing ones.");
-            sb.AppendLine("Hard requirements unchanged: one self-contained HTML document, no external resources, " +
-                          "complete idle animation, responsive to any resolution, real DOM interaction.");
+            AppendHardRequirementLine(sb, request);
             sb.AppendLine("Return ONLY the complete updated HTML document starting with <!DOCTYPE html> and ending with </html>.");
             sb.AppendLine();
             sb.AppendLine("Current HTML:");
             sb.AppendLine(previousHtml);
             return sb.ToString();
+        }
+
+        /// <summary>
+        /// 定点修改指令：只返回 find/replace JSON。用于大文件续改，以及整篇重写被截断/校验失败后的回退，
+        /// 避免模型再次整份输出时撞到单次 token 上限。
+        /// </summary>
+        public const string PatchSystemPrompt =
+            "You are a precise code editor working on a single-file HTML desktop wallpaper.\n" +
+            "Do NOT rewrite or return the whole document. Return ONLY a JSON object with a few targeted find/replace edits.\n" +
+            "Output shape (no markdown fences, no prose):\n" +
+            "{\"edits\":[{\"find\":\"exact snippet from the CURRENT HTML\",\"replace\":\"new snippet\"}],\"summary\":\"one short line\"}\n" +
+            "Hard rules:\n" +
+            "1. Each \"find\" must be copied character-for-character from the CURRENT HTML, including whitespace and quotes, and must appear EXACTLY ONCE in that document.\n" +
+            "2. Keep each snippet short: one line or one small block, under 400 characters. Never put the whole document into find or replace.\n" +
+            "3. \"replace\" is the final text for that snippet; use an empty string to delete it. Never use \"...\" or placeholders.\n" +
+            "4. Do not reformat or touch unrelated code. Preserve the existing composition and palette; keep interaction only if the user did not ask to remove it.\n" +
+            "5. Return 1-5 edits. If the change cannot be expressed as a unique replacement, return {\"edits\":[],\"summary\":\"<reason>\"}.";
+
+        /// <summary>
+        /// 续改的定点修改输入：诉求、计划、既有问题与当前完整 HTML。
+        /// </summary>
+        public static string BuildRevisionPatchPrompt(
+            GenerationRequest request,
+            string previousHtml,
+            string instruction,
+            string plan,
+            string rationale,
+            double score,
+            IReadOnlyList<string> issues,
+            IReadOnlyList<string> fixes,
+            IReadOnlyList<string> historySummaries,
+            string referenceDescription = null)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("Express the user's revision as targeted find/replace edits on the CURRENT wallpaper.");
+            sb.AppendLine("This is an INCREMENTAL edit. Preserve the existing composition, palette, scene structure and interaction " +
+                          "unless the user explicitly asks for a redo or asks to remove the interaction.");
+            sb.AppendLine();
+            sb.AppendLine("User request: " + (instruction ?? string.Empty).Trim());
+            AppendReferenceImage(sb, referenceDescription);
+            sb.AppendLine("Current art-director score: " + score.ToString("0.0", CultureInfo.InvariantCulture) + "/10");
+            if (!string.IsNullOrWhiteSpace(plan))
+            {
+                sb.AppendLine();
+                sb.AppendLine("Plan (follow these steps):");
+                sb.AppendLine(plan.Trim());
+            }
+            if (!string.IsNullOrWhiteSpace(rationale))
+                sb.AppendLine("Why: " + rationale.Trim());
+            if (issues != null && issues.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("Known issues to fix while editing:");
+                foreach (var issue in issues)
+                    sb.AppendLine("- " + issue);
+            }
+            if (fixes != null && fixes.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("Suggested fixes:");
+                foreach (var fix in fixes)
+                    sb.AppendLine("- " + fix);
+            }
+            if (historySummaries != null && historySummaries.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("Previous revisions already applied (do not undo them):");
+                foreach (var summary in historySummaries)
+                    sb.AppendLine("- " + summary);
+            }
+            AppendPatchRequestContext(sb, request);
+            sb.AppendLine();
+            sb.AppendLine("CURRENT HTML:");
+            sb.AppendLine(previousHtml);
+            sb.AppendLine();
+            sb.AppendLine(PatchOutputReminder);
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// 校验失败后的定点修复输入（整篇修复的同款约束，但只允许少量替换）。
+        /// </summary>
+        public static string BuildRepairPatchPrompt(GenerationRequest request, string previousHtml, ValidationResult issues)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("The wallpaper below failed validation. Fix ONLY the listed problems with targeted find/replace edits.");
+            sb.AppendLine("Problems:");
+            if (issues?.Issues != null)
+            {
+                foreach (var issue in issues.Issues)
+                    sb.AppendLine("- [" + issue.Code + "] " + issue.Message);
+            }
+            sb.AppendLine();
+            sb.AppendLine("Original request: " + request.Prompt.Trim());
+            AppendInteractionPreference(sb, request.Interaction);
+            AppendReference(sb, request);
+            AppendReferenceImage(sb, request.ReferenceImageDescription);
+            AppendEcoSpec(sb, request);
+            sb.AppendLine();
+            sb.AppendLine("CURRENT HTML:");
+            sb.AppendLine(previousHtml);
+            sb.AppendLine();
+            sb.AppendLine(PatchOutputReminder);
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Self-Refine 的定点修改输入：按评审计划与建议做小步替换，不整篇重写。
+        /// </summary>
+        public static string BuildRefinePatchPrompt(
+            GenerationRequest request,
+            string previousHtml,
+            double score,
+            IReadOnlyList<string> issues,
+            IReadOnlyList<string> fixes,
+            string plan = null,
+            string rationale = null)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("Apply the art-director review as targeted find/replace edits, not a rewrite.");
+            sb.AppendLine("The wallpaper scored " + score.ToString("0.0", CultureInfo.InvariantCulture) + "/10.");
+            if (!string.IsNullOrWhiteSpace(plan))
+            {
+                sb.AppendLine();
+                sb.AppendLine("Plan (follow these steps):");
+                sb.AppendLine(plan.Trim());
+            }
+            if (!string.IsNullOrWhiteSpace(rationale))
+                sb.AppendLine("Why: " + rationale.Trim());
+            sb.AppendLine();
+            sb.AppendLine("Issues:");
+            if (issues != null)
+            {
+                foreach (var issue in issues)
+                    sb.AppendLine("- " + issue);
+            }
+            if (fixes != null && fixes.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("Suggested fixes:");
+                foreach (var fix in fixes)
+                    sb.AppendLine("- " + fix);
+            }
+            AppendPatchRequestContext(sb, request);
+            sb.AppendLine();
+            sb.AppendLine("CURRENT HTML:");
+            sb.AppendLine(previousHtml);
+            sb.AppendLine();
+            sb.AppendLine(PatchOutputReminder);
+            return sb.ToString();
+        }
+
+        private const string PatchOutputReminder =
+            "Return ONLY the JSON object {\"edits\":[{\"find\":\"...\",\"replace\":\"...\"}],\"summary\":\"...\"} " +
+            "with 1-5 unique, exact snippets from CURRENT HTML. Never return the full document.";
+
+        private static void AppendPatchRequestContext(StringBuilder sb, GenerationRequest request)
+        {
+            sb.AppendLine();
+            sb.AppendLine("Original request: " + request.Prompt.Trim());
+            AppendInteractionPreference(sb, request.Interaction);
+            AppendReference(sb, request);
+            AppendReferenceImage(sb, request.ReferenceImageDescription);
+            AppendEcoSpec(sb, request);
+            AppendHardRequirementLine(sb, request);
+        }
+
+        /// <summary>
+        /// 修改/修复类提示词的硬要求行：网络约束跟随开关，避免与允许联网的页面自相矛盾。
+        /// </summary>
+        private static void AppendHardRequirementLine(StringBuilder sb, GenerationRequest request)
+        {
+            sb.AppendLine("Hard requirements unchanged: one self-contained HTML document, " +
+                          (request.AllowExternalNetwork
+                              ? "external HTTPS requests only when the user asked for live data, always with graceful degradation, "
+                              : "no external resources, ") +
+                          "complete idle animation, responsive to any resolution. Interaction is optional, not a requirement.");
+        }
+
+        /// <summary>
+        /// 把视觉模型转述的参考图内容放进续改提示词；只作为视觉参考，不替换用户的原始主题。
+        /// </summary>
+        private static void AppendReferenceImage(StringBuilder sb, string referenceDescription)
+        {
+            if (string.IsNullOrWhiteSpace(referenceDescription))
+                return;
+
+            sb.AppendLine();
+            sb.AppendLine("Reference image supplied by the user (visual/style reference only; do not replace the original " +
+                          "theme unless the request explicitly asks for it):");
+            sb.AppendLine(referenceDescription.Trim());
         }
 
         private static string DescribeInteraction(InteractionCapability interaction)
@@ -296,33 +531,22 @@ namespace Lively.Ai
         }
 
         /// <summary>
-        /// 把交互从“可选”变成可执行、可校验的硬要求，并逐项说明每种能力的最小行为。
-        /// 该校验由 HtmlWallpaperValidator 的 V009 兜底，缺失即判不合格并触发修复。
+        /// 交互只是可选偏好：说明用户倾向，但由模型按主题决定是否实现，不做校验、不强制波纹。
         /// </summary>
-        private static void AppendInteractionSpec(StringBuilder sb, InteractionCapability interaction)
+        private static void AppendInteractionPreference(StringBuilder sb, InteractionCapability interaction)
         {
             if (interaction == InteractionCapability.none)
             {
-                sb.AppendLine("Interaction rules: none. Do not register pointer or keyboard handlers.");
+                sb.AppendLine("Interaction: optional. Add pointer/click/keyboard feedback only if it genuinely fits the theme; " +
+                              "do not add generic mouse ripples or click bursts just to satisfy a checklist. Omit it when it " +
+                              "does not improve the scene.");
                 return;
             }
 
-            sb.AppendLine("Interaction rules (mandatory, validated):");
-            sb.AppendLine("- Use native DOM events registered on the canvas or window; no libraries, no Lively APIs.");
-            sb.AppendLine("- The idle animation must keep running at full quality when the pointer is idle or outside the window.");
-            sb.AppendLine("- Feedback must appear within one frame and decay smoothly; never block or pause the animation loop.");
-            if ((interaction & InteractionCapability.hover) != 0)
-                sb.AppendLine("- hover: track pointermove and continuously influence the scene (parallax, particle attraction/repulsion, " +
-                              "localized glow or distortion) with a distance falloff; ease back on pointerleave.");
-            if ((interaction & InteractionCapability.click) != 0)
-                sb.AppendLine("- click: pointerdown must emit a clearly visible response (pulse, ripple, shockwave or burst) that " +
-                              "expands and fades out within 0.5-1.5s; holding the button may strengthen it.");
-            if ((interaction & InteractionCapability.drag) != 0)
-                sb.AppendLine("- drag: while the button is held, pointermove must change a scene parameter (view angle, speed, zoom) " +
-                              "with obvious visual feedback, and release must settle without breaking the loop.");
-            if ((interaction & InteractionCapability.keyboard) != 0)
-                sb.AppendLine("- keyboard: handle keydown/keyup for a small documented key set (space to pause, arrows to steer) and " +
-                              "never preventDefault browser shortcuts.");
+            sb.AppendLine("Interaction preference (optional): the user leans toward " + DescribeInteraction(interaction) +
+                          ". Add it only when it genuinely fits the theme and improves the scene; do not add generic mouse " +
+                          "ripples or click bursts just to satisfy a checklist. If it does not fit, omit interaction and keep " +
+                          "the idle animation complete.");
         }
 
         /// <summary>
@@ -337,37 +561,46 @@ namespace Lively.Ai
         }
 
         /// <summary>
+        /// 宿主注入数据契约（生成与修改共用，保证同一份页面在两种提示词下都读同一份数据）。
+        /// </summary>
+        private static void AppendHostEnvironmentSpec(StringBuilder sb)
+        {
+            sb.AppendLine();
+            sb.AppendLine(HostEnvironmentSpec);
+        }
+
+        /// <summary>
+        /// 网络策略：默认完全离线；仅在宿主开关打开时追加可联网说明，system prompt 保持静态。
+        /// </summary>
+        private static void AppendNetworkPolicy(StringBuilder sb, GenerationRequest request)
+        {
+            if (!request.AllowExternalNetwork)
+            {
+                sb.AppendLine("Offline required: yes. Absolutely no network requests.");
+                return;
+            }
+
+            sb.AppendLine("External network access is allowed for this wallpaper: you may call HTTPS data sources when the " +
+                          "user explicitly asked for live data, but every request must degrade gracefully — short timeout, " +
+                          "keep the last known value and keep the scene complete and animated when the network fails.");
+            sb.AppendLine("The host still injects window.contactableEnv for time and weather; prefer it and never fetch " +
+                          "weather or time yourself.");
+        }
+
+        /// <summary>
         /// 按交互能力条件注入参考代码：默认内置去视觉骨架，另有调用方提供的外部参考时一并追加。
         /// system prompt 保持完全静态以命中服务端前缀缓存，参考只进入 user prompt。
         /// </summary>
         private static void AppendReference(StringBuilder sb, GenerationRequest request)
         {
-            var useBuiltIn = request.Interaction != InteractionCapability.none && !string.IsNullOrWhiteSpace(InteractionScaffold);
             var useExternal = !string.IsNullOrWhiteSpace(request.ReferenceText);
-            if (!useBuiltIn && !useExternal)
+            if (!useExternal)
                 return;
 
             sb.AppendLine();
-            if (useBuiltIn)
-            {
-                sb.AppendLine("Reference scaffold (structure only; do NOT copy its colors, sizes or artwork):");
-                sb.AppendLine(InteractionScaffold!.Trim());
-            }
-            if (useExternal)
-            {
-                sb.AppendLine();
-                sb.AppendLine("Additional reference supplied by the caller (structure only; do NOT copy its colors, sizes or artwork):");
-                sb.AppendLine(request.ReferenceText!.Trim());
-            }
+            sb.AppendLine("Additional reference supplied by the caller (structure only; do NOT copy its colors, sizes or artwork):");
+            sb.AppendLine(request.ReferenceText!.Trim());
         }
 
-        private static string? LoadEmbeddedText(string resourceName)
-        {
-            using var stream = typeof(PromptBuilder).Assembly.GetManifestResourceStream(resourceName);
-            if (stream == null)
-                return null;
-            using var reader = new StreamReader(stream, Encoding.UTF8);
-            return reader.ReadToEnd();
-        }
     }
 }

@@ -81,8 +81,6 @@
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <StackPanel Spacing="2">
                         <TextBlock FontSize="30" FontWeight="SemiBold" Text="壁纸库" />
@@ -110,23 +108,74 @@
                         MinWidth="190"
                         VerticalAlignment="Bottom"
                         DisplayMemberPath="Label" />
-                    <Button
+                    <StackPanel
                         Grid.Column="2"
                         VerticalAlignment="Bottom"
-                        Click="RefreshButton_Click"
-                        Content="刷新" />
-                    <Button
-                        Grid.Column="3"
-                        VerticalAlignment="Bottom"
-                        Click="OpenFolderButton_Click"
-                        Content="打开库目录" />
-                    <Button
-                        Grid.Column="4"
-                        VerticalAlignment="Bottom"
-                        Click="CreateButton_Click"
-                        Content="新建壁纸"
-                        Style="{StaticResource AccentButtonStyle}" />
+                        Orientation="Horizontal"
+                        Spacing="8">
+                        <Button Click="RefreshButton_Click" Content="刷新" />
+                        <Button
+                            Click="CreateButton_Click"
+                            Content="新建壁纸"
+                            Style="{StaticResource AccentButtonStyle}" />
+                    </StackPanel>
                 </Grid>
+
+                <!--  存储位置：一眼看到壁纸实际保存在哪里，并按来源筛选  -->
+                <Border
+                    Padding="14,12"
+                    Background="#146EA8FE"
+                    BorderBrush="{ThemeResource ContactableHairlineBrush}"
+                    BorderThickness="1"
+                    CornerRadius="12">
+                    <Grid ColumnSpacing="16">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Spacing="4">
+                            <TextBlock
+                                CharacterSpacing="100"
+                                FontSize="10"
+                                Foreground="{ThemeResource ContactableAccentBrush}"
+                                Text="STORAGE · 壁纸库位置" />
+                            <TextBlock
+                                x:Name="LibraryPathText"
+                                FontSize="13"
+                                IsTextSelectionEnabled="True"
+                                TextWrapping="Wrap" />
+                            <TextBlock
+                                x:Name="LibrarySourceSummary"
+                                FontSize="11"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="AI 生成 0 张 · 我导入的 0 张 · 内置 0 张"
+                                TextWrapping="Wrap" />
+                            <StackPanel
+                                Margin="0,4,0,0"
+                                Orientation="Horizontal"
+                                Spacing="8">
+                                <TextBlock
+                                    VerticalAlignment="Center"
+                                    FontSize="11"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="按来源查看" />
+                                <ComboBox
+                                    x:Name="SourceFilterCombo"
+                                    MinWidth="180"
+                                    DisplayMemberPath="Label"
+                                    SelectionChanged="SourceFilterCombo_SelectionChanged" />
+                            </StackPanel>
+                        </StackPanel>
+                        <StackPanel
+                            Grid.Column="1"
+                            VerticalAlignment="Center"
+                            Orientation="Horizontal"
+                            Spacing="8">
+                            <Button Click="OpenFolderButton_Click" Content="打开壁纸库" />
+                            <Button Click="OpenDraftsButton_Click" Content="打开生成草稿" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
             </StackPanel>
 
             <Grid Grid.Row="1" Margin="28,0,28,0">
@@ -199,10 +248,43 @@
                                             FontWeight="SemiBold"
                                             Text="{Binding Title}"
                                             TextTrimming="CharacterEllipsis" />
-                                        <TextBlock
-                                            FontSize="12"
-                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                            Text="{Binding TypeText}" />
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <TextBlock
+                                                VerticalAlignment="Center"
+                                                FontSize="12"
+                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                Text="{Binding TypeText}" />
+                                            <Border
+                                                Padding="6,1"
+                                                VerticalAlignment="Center"
+                                                Background="#1A6EA8FE"
+                                                CornerRadius="6">
+                                                <TextBlock
+                                                    FontSize="10"
+                                                    Foreground="{ThemeResource ContactableAccentBrush}"
+                                                    Text="{Binding SourceText}" />
+                                            </Border>
+                                        </StackPanel>
+                                        <Grid ColumnSpacing="6">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock
+                                                VerticalAlignment="Center"
+                                                FontSize="11"
+                                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                                Text="{Binding FolderNameText}"
+                                                TextTrimming="CharacterEllipsis" />
+                                            <HyperlinkButton
+                                                Grid.Column="1"
+                                                Padding="0"
+                                                VerticalAlignment="Center"
+                                                Click="LocateItem_Click"
+                                                Content="定位"
+                                                FontSize="11"
+                                                Tag="{Binding}" />
+                                        </Grid>
                                         <StackPanel
                                             Margin="0,6,0,0"
                                             Orientation="Horizontal"

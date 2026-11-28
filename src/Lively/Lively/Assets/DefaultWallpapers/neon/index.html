@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#05070f" />
+  <title>霓虹夜雨</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #05070f;
+      user-select: none;
+      -webkit-user-select: none;
+      animation: appear 1.4s ease .05s both;
+    }
+
+    @keyframes appear {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    #scene {
+      position: fixed;
+      inset: 0;
+      /* 低分辨率像素缓冲区拉伸到视口：必须显式 100%，否则替换元素退回固有尺寸 */
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: crosshair;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html, body { animation: none; }
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="scene"></canvas>
+  <script>
+    (function () {
+      'use strict';
+
+      var canvas = document.getElementById('scene');
+      var ctx = canvas.getContext('2d', { alpha: false });
+      var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+      // 低分辨率内部缓冲，放大后得到像素风
+      var PIXEL_SCALE = 4;
+      var W = 0, H = 0, cssW = 0, cssH = 0;
+
+      var pointer = { x: 0, y: 0, active: false, down: false, downAt: 0 };
+      var ripples = [];
+      var RIPPLE_LIFE = 1.1;
+      var MAX_RIPPLES = 8;
+
+      // 节能：空闲后 60fps 平滑降到 30fps
+      var lastInput = performance.now();
+      var eco = 0, lastDraw = 0, time = 0;
+
+      var buildings = [], windows = [], rain = [], stars = [], neonSigns = [],
+        groundGlow = [], splashes = [], cars = [], puddles = [];
+      var camZ = 0;
+
+      var CYAN = '#22D3EE';
+      var MAGENTA = '#e04bff';
+      var PINK = '#ff4fa3';
+      var DEEP = '#05070f';
+      var BUILD_COLORS = ['#0a1220', '#0b1526', '#0d1a2e', '#091120', '#0a1a2a'];
+
+      function rand(a, b) { return a + Math.random() * (b - a); }
+      function randInt(a, b) { return Math.floor(rand(a, b + 1)); }
+      function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+      function markInput() {
+        lastInput = performance.now();
+        eco = 0;
+      }
+
+      // ---------- 场景构建 ----------
+      function buildScene() {
+        buildings = [];
+        windows = [];
+        neonSigns = [];
+        groundGlow = [];
+        stars = [];
+        rain = [];
+        splashes = [];
+        cars = [];
+        puddles = [];
+
+        var horizon = H * 0.72;
+
+        var starCount = Math.floor(W * H * 0.00006);
+        for (var s = 0; s < starCount; s++) {
+          stars.push({
+            x: rand(0, W),
+            y: rand(0, horizon * 0.85),
+            b: rand(0.15, 0.6),
+            tw: rand(0.5, 2.2),
+            ph: rand(0, Math.PI * 2)
+          });
+        }
+
+        var layers = [
+          { count: 26, hMin: 0.18, hMax: 0.38, wMin: 0.03, wMax: 0.075, shade: 0.55, winDensity: 0.07 },
+          { count: 20, hMin: 0.24, hMax: 0.50, wMin: 0.045, wMax: 0.10, shade: 0.8, winDensity: 0.10 },
+          { count: 14, hMin: 0.30, hMax: 0.62, wMin: 0.06, wMax: 0.13, shade: 1.0, winDensity: 0.14 }
+        ];
+
+        for (var li = 0; li < layers.length; li++) {
+          var L = layers[li];
+          var x = -W * 0.06;
+          while (x < W * 1.06) {
+            var bw = rand(W * L.wMin, W * L.wMax);
+            var bh = rand(H * L.hMin, H * L.hMax);
+            var b = {
+              x: x,
+              w: bw,
+              h: bh,
+              base: horizon + (li === 2 ? H * 0.02 : 0),
+              layer: li,
+              shade: L.shade,
+              color: BUILD_COLORS[randInt(0, BUILD_COLORS.length - 1)],
+              antenna: Math.random() < 0.35,
+              winDensity: L.winDensity,
+              seed: Math.random() * 1000
+            };
+            buildings.push(b);
+
+            var cols = Math.max(2, Math.floor(bw / (W * 0.012)));
+            var rows = Math.max(2, Math.floor(bh / (H * 0.028)));
+            var cw = bw / cols;
+            var ch = bh / rows;
+            for (var r = 0; r < rows; r++) {
+              for (var c = 0; c < cols; c++) {
+                if (Math.random() < b.winDensity) {
+                  var pal = Math.random();
+                  var col = pal < 0.55 ? CYAN : (pal < 0.8 ? MAGENTA : '#ffe27a');
+                  windows.push({
+                    x: b.x + c * cw + cw * 0.22,
+                    y: b.base - bh + r * ch + ch * 0.22,
+                    w: Math.max(1, cw * 0.46),
+                    h: Math.max(1, ch * 0.40),
+                    color: col,
+                    layer: li,
+                    flick: Math.random() < 0.12,
+                    ph: Math.random() * Math.PI * 2,
+                    sp: rand(0.4, 2.4),
+                    a: rand(0.35, 1.0)
+                  });
+                }
+              }
+            }
+
+            if (li === 2 && Math.random() < 0.45) {
+              var signColor = Math.random() < 0.5 ? CYAN : (Math.random() < 0.6 ? PINK : MAGENTA);
+              neonSigns.push({
+                x: b.x + bw * rand(0.1, 0.5),
+                y: b.base - bh * rand(0.45, 0.9),
+                w: bw * rand(0.16, 0.34),
+                h: H * rand(0.012, 0.024),
+                color: signColor,
+                ph: Math.random() * Math.PI * 2,
+                sp: rand(0.8, 3.0),
+                vert: Math.random() < 0.35
+              });
+            }
+
+            x += bw + rand(W * 0.002, W * 0.012);
+          }
+        }
+
+        for (var g = 0; g < 6; g++) {
+          groundGlow.push({
+            x: rand(0, W),
+            y: horizon + rand(1, H * 0.09),
+            w: rand(W * 0.08, W * 0.3),
+            h: rand(1, 2),
+            color: Math.random() < 0.6 ? CYAN : MAGENTA,
+            ph: Math.random() * Math.PI * 2
+          });
+        }
+
+        // 湿地面水洼：横向反光块
+        for (var pd = 0; pd < 7; pd++) {
+          puddles.push({
+            x: rand(0, W),
+            y: horizon + rand(H * 0.03, H * 0.26),
+            w: rand(W * 0.05, W * 0.15),
+            h: rand(1, 2),
+            color: Math.random() < 0.6 ? CYAN : PINK,
+            ph: rand(0, Math.PI * 2)
+          });
+        }
+
+        var rainCount = Math.floor(W * H * 0.0009);
+        for (var i = 0; i < rainCount; i++) {
+          rain.push({
+            x: rand(0, W),
+            y: rand(0, H),
+            len: rand(H * 0.012, H * 0.045),
+            sp: rand(H * 0.35, H * 0.95),
+            a: rand(0.12, 0.55),
+            drift: rand(-W * 0.02, W * 0.02)
+          });
+        }
+
+        // 低空飞行器的光带
+        var carCount = W > 900 ? 5 : 3;
+        for (var cc = 0; cc < carCount; cc++) {
+          cars.push({
+            x: rand(0, W),
+            y: horizon - rand(H * 0.08, H * 0.34),
+            sp: rand(W * 0.05, W * 0.14) * (Math.random() < 0.5 ? 1 : -1),
+            len: rand(W * 0.03, W * 0.07),
+            color: Math.random() < 0.55 ? CYAN : PINK,
+            ph: rand(0, Math.PI * 2)
+          });
+        }
+      }
+
+      function resize() {
+        var rect = canvas.getBoundingClientRect();
+        cssW = rect.width || window.innerWidth;
+        cssH = rect.height || window.innerHeight;
+
+        var maxPixels = 420000;
+        var scale = 4;
+        var w = Math.max(160, Math.floor(cssW / scale));
+        var h = Math.max(90, Math.floor(cssH / scale));
+        while (w * h > maxPixels) {
+          scale += 1;
+          w = Math.max(160, Math.floor(cssW / scale));
+          h = Math.max(90, Math.floor(cssH / scale));
+        }
+        PIXEL_SCALE = scale;
+
+        W = w;
+        H = h;
+        canvas.width = W;
+        canvas.height = H;
+        ctx.imageSmoothingEnabled = false;
+
+        buildScene();
+      }
+
+      window.addEventListener('resize', resize, { passive: true });
+
+      // ---------- 交互坐标：按 rect 归一化，兼容 DPR / 缩放 / 画布偏移 ----------
+      function toScene(e) {
+        var rect = canvas.getBoundingClientRect();
+        return {
+          x: clamp((e.clientX - rect.left) / Math.max(1, rect.width), 0, 1) * W,
+          y: clamp((e.clientY - rect.top) / Math.max(1, rect.height), 0, 1) * H
+        };
+      }
+
+      function onPointerMove(e) {
+        var p = toScene(e);
+        pointer.x = p.x;
+        pointer.y = p.y;
+        pointer.active = true;
+        markInput();
+      }
+
+      window.addEventListener('pointermove', onPointerMove, { passive: true });
+
+      window.addEventListener('pointerdown', function (e) {
+        var p = toScene(e);
+        pointer.x = p.x;
+        pointer.y = p.y;
+        pointer.active = true;
+        pointer.down = true;
+        pointer.downAt = performance.now();
+        ripples.push({ x: p.x, y: p.y, born: time, power: 1 });
+        if (ripples.length > MAX_RIPPLES) ripples.shift();
+        markInput();
+      }, { passive: true });
+
+      window.addEventListener('pointerup', function () {
+        pointer.down = false;
+        markInput();
+      }, { passive: true });
+
+      window.addEventListener('pointercancel', function () {
+        pointer.down = false;
+        pointer.active = false;
+        markInput();
+      }, { passive: true });
+
+      window.addEventListener('pointerleave', function () {
+        pointer.active = false;
+        pointer.down = false;
+      }, { passive: true });
+
+      window.addEventListener('blur', function () {
+        pointer.active = false;
+        pointer.down = false;
+      });
+
+      window.addEventListener('keydown', function (e) {
+        if (e.key === ' ' && ripples.length < MAX_RIPPLES) {
+          ripples.push({ x: W * 0.5, y: H * 0.55, born: time, power: 1.5 });
+        }
+        markInput();
+      }, { passive: true });
+
+      // ---------- 指针/涟漪位移 ----------
+      function interactionOffsetFor(x, y, t, sceneScale) {
+        var ox = 0, oy = 0, boost = 0;
+        if (pointer.active) {
+          var dx = x - pointer.x;
+          var dy = y - pointer.y;
+          var dist = Math.sqrt(dx * dx + dy * dy) + 1e-4;
+          var radius = sceneScale * 1.6;
+          if (dist < radius) {
+            var f = 1 - dist / radius;
+            var strength = f * f * (pointer.down ? 1.7 : 1.0);
+            ox -= (dx / dist) * strength * sceneScale * 0.05;
+            oy -= (dy / dist) * strength * sceneScale * 0.05;
+            boost += f;
+          }
+        }
+        for (var i = 0; i < ripples.length; i++) {
+          var r = ripples[i];
+          var age = t - r.born;
+          if (age < 0 || age > RIPPLE_LIFE) continue;
+          var prog = age / RIPPLE_LIFE;
+          var ring = sceneScale * 4.5 * (1 - Math.pow(1 - prog, 2));
+          var dxr = x - r.x;
+          var dyr = y - r.y;
+          var dr = Math.sqrt(dxr * dxr + dyr * dyr) + 1e-4;
+          var w = Math.exp(-Math.pow((dr - ring) / (sceneScale * 0.7), 2)) * (1 - prog);
+          ox += (dxr / dr) * w * sceneScale * 0.07;
+          oy += (dyr / dr) * w * sceneScale * 0.07;
+          boost += w;
+        }
+        return { x: ox, y: oy, boost: boost };
+      }
+
+      // ---------- 绘制 ----------
+      function drawSky(t) {
+        var horizon = H * 0.72;
+        var g = ctx.createLinearGradient(0, 0, 0, horizon);
+        g.addColorStop(0, '#03040a');
+        g.addColorStop(0.55, '#07101f');
+        g.addColorStop(1, '#0a1b2e');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, horizon + 2);
+
+        var starBudget = Math.floor(stars.length * (1 - eco * 0.45));
+        for (var i = 0; i < starBudget; i++) {
+          var s = stars[i];
+          var tw = 0.5 + 0.5 * Math.sin(t * s.tw + s.ph);
+          ctx.globalAlpha = s.b * (0.4 + tw * 0.6);
+          ctx.fillStyle = i % 7 === 0 ? CYAN : '#cfe9ff';
+          ctx.fillRect(s.x | 0, s.y | 0, 1, 1);
+        }
+        ctx.globalAlpha = 1;
+
+        var hg = ctx.createRadialGradient(W * 0.72, horizon * 0.55, 0, W * 0.72, horizon * 0.55, W * 0.45);
+        hg.addColorStop(0, 'rgba(34,211,238,0.16)');
+        hg.addColorStop(0.5, 'rgba(34,211,238,0.05)');
+        hg.addColorStop(1, 'rgba(34,211,238,0)');
+        ctx.fillStyle = hg;
+        ctx.fillRect(0, 0, W, horizon);
+
+        // 远景云层闪电：偶发白闪
+        var bolt = Math.sin(t * 0.31) * Math.sin(t * 0.73 + 1.7);
+        if (bolt > 0.93) {
+          var flash = (bolt - 0.93) / 0.07;
+          ctx.globalAlpha = flash * 0.28;
+          ctx.fillStyle = '#8fdcff';
+          ctx.fillRect(0, 0, W, horizon);
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawGround(t) {
+        var horizon = H * 0.72;
+        var gg = ctx.createLinearGradient(0, horizon, 0, H);
+        gg.addColorStop(0, '#07131f');
+        gg.addColorStop(0.45, '#050b14');
+        gg.addColorStop(1, '#02040a');
+        ctx.fillStyle = gg;
+        ctx.fillRect(0, horizon, W, H - horizon);
+
+        // 街道湿面：贴近地平线更亮，向下渐隐
+        var st = ctx.createLinearGradient(0, horizon, 0, H);
+        st.addColorStop(0, 'rgba(34,211,238,0.06)');
+        st.addColorStop(0.35, 'rgba(34,211,238,0.018)');
+        st.addColorStop(1, 'rgba(34,211,238,0)');
+        ctx.fillStyle = st;
+        ctx.fillRect(0, horizon, W, H - horizon);
+
+        // 楼体在湿地面的竖向倒影
+        for (var i = 0; i < buildings.length; i++) {
+          var b = buildings[i];
+          if (b.layer < 2) continue;
+          var refH = Math.max(3, (b.h * 0.34) | 0);
+          var rw = Math.max(1, (b.w * 0.58) | 0);
+          var rx0 = (b.x + b.w * 0.21) | 0;
+          var ro = interactionOffsetFor(b.x + b.w * 0.5, horizon, t, Math.min(W, H) * 0.5);
+          var rc = (b.seed % 3) < 2 ? '34,211,238' : '255,79,163';
+          var rg = ctx.createLinearGradient(0, horizon, 0, horizon + refH);
+          rg.addColorStop(0, 'rgba(' + rc + ',0.20)');
+          rg.addColorStop(0.4, 'rgba(' + rc + ',0.06)');
+          rg.addColorStop(1, 'rgba(' + rc + ',0)');
+          ctx.fillStyle = rg;
+          ctx.fillRect((rx0 + ro.x * 0.4) | 0, horizon, rw, refH);
+        }
+        ctx.globalAlpha = 1;
+
+        // 地平线雾光，拉开天空与街道的层次
+        var hz = ctx.createRadialGradient(W * 0.5, horizon, 0, W * 0.5, horizon, W * 0.55);
+        hz.addColorStop(0, 'rgba(34,211,238,0.10)');
+        hz.addColorStop(0.6, 'rgba(34,211,238,0.03)');
+        hz.addColorStop(1, 'rgba(34,211,238,0)');
+        ctx.fillStyle = hz;
+        ctx.fillRect(0, horizon - H * 0.3, W, H * 0.42);
+
+        // 霓虹地面光带 + 竖向拖影
+        for (var g = 0; g < groundGlow.length; g++) {
+          var gl = groundGlow[g];
+          var pulse = 0.4 + 0.6 * Math.sin(t * 1.3 + gl.ph);
+          var off = interactionOffsetFor(gl.x, gl.y, t, Math.min(W, H) * 0.5);
+          ctx.globalAlpha = 0.20 + pulse * 0.30 + off.boost * 0.3;
+          ctx.fillStyle = gl.color;
+          ctx.fillRect((gl.x + off.x) | 0, (gl.y + off.y) | 0, Math.ceil(gl.w), Math.ceil(gl.h));
+        }
+        ctx.globalAlpha = 1;
+
+        // 水洼反光
+        for (var p = 0; p < puddles.length; p++) {
+          var pd = puddles[p];
+          var pp = 0.35 + 0.65 * Math.sin(t * 1.7 + pd.ph);
+          var po = interactionOffsetFor(pd.x, pd.y, t, Math.min(W, H) * 0.5);
+          ctx.globalAlpha = 0.10 + pp * 0.16 + po.boost * 0.25;
+          ctx.fillStyle = pd.color;
+          ctx.fillRect((pd.x + po.x) | 0, (pd.y + po.y) | 0, Math.ceil(pd.w), Math.max(1, pd.h));
+        }
+        ctx.globalAlpha = 1;
+
+        // 地平线霓虹线
+        ctx.globalAlpha = 0.35;
+        ctx.fillStyle = CYAN;
+        ctx.fillRect(0, horizon, W, 1);
+        ctx.globalAlpha = 1;
+
+        // 阶梯状路缘：用像素块堆出高低起伏，打破一条平直分界
+        var stepW = Math.max(2, Math.round(W / 72));
+        for (var cx0 = 0; cx0 < W; cx0 += stepW) {
+          var ux = cx0 / W;
+          var hv = 1 + Math.round(
+            (Math.sin(ux * 7.3 + 0.6) * 0.5 + 0.5) * 3
+            + (Math.sin(ux * 19.1 + 2.2) * 0.5 + 0.5) * 2
+          );
+          ctx.fillStyle = 'rgba(4,7,12,0.96)';
+          ctx.fillRect(cx0, horizon + 1, stepW, hv);
+          ctx.fillStyle = 'rgba(34,211,238,0.12)';
+          ctx.fillRect(cx0, horizon + 1 + hv, stepW, 1);
+        }
+
+        // 楼脚灯光洒到人行道
+        for (var bl = 0; bl < buildings.length; bl++) {
+          var bd = buildings[bl];
+          if (bd.layer < 2) continue;
+          var bo = interactionOffsetFor(bd.x + bd.w * 0.5, horizon, t, Math.min(W, H) * 0.5);
+          var bc = Math.abs(Math.sin(bd.seed)) > 0.5 ? CYAN : PINK;
+          ctx.globalAlpha = 0.05 + 0.03 * Math.sin(t * 1.2 + bd.seed);
+          ctx.fillStyle = bc;
+          ctx.fillRect((bd.x + bo.x * 0.4) | 0, horizon + 2, Math.max(1, bd.w | 0), 4);
+        }
+        ctx.globalAlpha = 1;
+
+        // 透视车道线：向远处汇聚，给下半屏纵深
+        ctx.globalAlpha = 0.09;
+        ctx.strokeStyle = '#cfe0f0';
+        ctx.lineWidth = 1;
+        for (var lz = 0; lz < 5; lz++) {
+          ctx.beginPath();
+          ctx.moveTo(W * (0.5 + (lz - 2) * 0.012), horizon + 2);
+          ctx.lineTo(W * (0.5 + (lz - 2) * 0.26), H);
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+
+        // 近景大涟漪
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (var fz = 0; fz < 4; fz++) {
+          var kz = (t * 0.22 + fz * 0.25) % 1;
+          var rcx = W * (0.18 + fz * 0.21) + Math.sin(t * 0.7 + fz) * W * 0.02;
+          var rcy = horizon + H * (0.09 + fz * 0.035);
+          var rrad = W * 0.012 + kz * W * 0.05;
+          ctx.strokeStyle = 'rgba(170,215,240,' + ((1 - kz) * 0.20).toFixed(3) + ')';
+          ctx.beginPath();
+          ctx.ellipse(rcx, rcy, rrad, rrad * 0.28, 0, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        ctx.restore();
+
+        // 底部压暗
+        var btm = ctx.createLinearGradient(0, H * 0.74, 0, H);
+        btm.addColorStop(0, 'rgba(3,5,10,0)');
+        btm.addColorStop(0.6, 'rgba(3,5,10,0.28)');
+        btm.addColorStop(1, 'rgba(3,5,10,0.7)');
+        ctx.fillStyle = btm;
+        ctx.fillRect(0, H * 0.74, W, H * 0.26);
+      }
+
+      function drawBuildings(t) {
+        var horizon = H * 0.72;
+        var camPush = camZ % 1;
+        var pushScale = 1 + camPush * 0.06;
+
+        for (var i = 0; i < buildings.length; i++) {
+          var b = buildings[i];
+          var par = 0.35 + b.layer * 0.32;
+          var depthX = (b.x - W * 0.5) * pushScale + W * 0.5;
+          var depthY = b.base * pushScale;
+          var bw = b.w * pushScale;
+          var bh = b.h * pushScale;
+
+          var off = interactionOffsetFor(depthX + bw * 0.5, depthY - bh * 0.5, t, Math.min(W, H) * 0.5);
+          var px = depthX + off.x * par;
+          var py = depthY - bh + off.y * par;
+
+          ctx.fillStyle = b.color;
+          ctx.fillRect(px | 0, py | 0, Math.ceil(bw), Math.ceil(bh));
+
+          ctx.globalAlpha = 0.25 + b.layer * 0.18;
+          ctx.fillStyle = CYAN;
+          ctx.fillRect(px | 0, py | 0, 1, Math.ceil(bh));
+          ctx.globalAlpha = 1;
+
+          if (b.antenna) {
+            var ax = px + bw * 0.5;
+            var ay = py;
+            var ah = bh * 0.12;
+            ctx.fillStyle = '#0e2233';
+            ctx.fillRect(ax | 0, (ay - ah) | 0, 1, Math.ceil(ah));
+            var blink = 0.5 + 0.5 * Math.sin(t * 2.2 + b.seed);
+            if (blink > 0.6) {
+              ctx.fillStyle = '#ff4f7a';
+              ctx.globalAlpha = blink;
+              ctx.fillRect(ax | 0, (ay - ah) | 0, 1, 1);
+              ctx.globalAlpha = 1;
+            }
+          }
+        }
+
+        var winBudget = Math.floor(windows.length * (1 - eco * 0.2));
+        for (var w = 0; w < winBudget; w++) {
+          var win = windows[w];
+          var par2 = 0.35 + win.layer * 0.32;
+          var depthX2 = (win.x - W * 0.5) * pushScale + W * 0.5;
+          var depthY2 = win.y * pushScale;
+
+          var off2 = interactionOffsetFor(depthX2, depthY2, t, Math.min(W, H) * 0.5);
+          var wx = depthX2 + off2.x * par2;
+          var wy = depthY2 + off2.y * par2;
+
+          var alpha = win.a;
+          if (win.flick) {
+            var fl = Math.sin(t * win.sp + win.ph);
+            alpha *= fl > 0.75 ? 0.25 : 1;
+          }
+          if (off2.boost > 0.01) alpha = Math.min(1, alpha + off2.boost * 0.6);
+          ctx.globalAlpha = alpha;
+          ctx.fillStyle = win.color;
+          ctx.fillRect(wx | 0, wy | 0, Math.max(1, win.w * pushScale), Math.max(1, win.h * pushScale));
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawNeonSigns(t) {
+        var pushScale = 1 + (camZ % 1) * 0.06;
+        for (var i = 0; i < neonSigns.length; i++) {
+          var n = neonSigns[i];
+          var x = (n.x - W * 0.5) * pushScale + W * 0.5;
+          var y = n.y * pushScale;
+          var w = n.w * pushScale;
+          var h = n.h * pushScale;
+
+          var off = interactionOffsetFor(x + w * 0.5, y + h * 0.5, t, Math.min(W, H) * 0.5);
+          x += off.x;
+          y += off.y;
+
+          var pulse = 0.55 + 0.45 * Math.sin(t * n.sp + n.ph);
+          var strength = Math.min(1, pulse + off.boost * 0.9);
+
+          ctx.globalAlpha = 0.18 + strength * 0.22;
+          ctx.fillStyle = n.color;
+          ctx.fillRect((x - 2) | 0, (y - 2) | 0, Math.ceil(w + 4), Math.ceil(h + 4));
+
+          ctx.globalAlpha = 0.7 + strength * 0.3;
+          ctx.fillRect(x | 0, y | 0, Math.max(1, w), Math.max(1, h));
+
+          if (n.vert) {
+            ctx.globalAlpha = 0.5;
+            ctx.fillStyle = DEEP;
+            var segs = Math.max(2, Math.floor(h / 3));
+            for (var s = 1; s < segs; s++) {
+              ctx.fillRect(x | 0, (y + (h / segs) * s) | 0, Math.max(1, w), 1);
+            }
+          }
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawCars(t, dt) {
+        var md = reduceMotion ? 0.2 : 1;
+        for (var i = 0; i < cars.length; i++) {
+          var c = cars[i];
+          c.x += c.sp * dt * md;
+          if (c.sp > 0 && c.x - c.len > W) c.x = -c.len;
+          if (c.sp < 0 && c.x + c.len < 0) c.x = W + c.len;
+
+          var flick = 0.55 + 0.45 * Math.sin(t * 3.1 + c.ph);
+          ctx.globalAlpha = 0.5 + flick * 0.5;
+          ctx.fillStyle = c.color;
+          ctx.fillRect(c.x | 0, c.y | 0, Math.max(1, Math.abs(c.len)), 1);
+          ctx.globalAlpha = 0.18 + flick * 0.2;
+          ctx.fillRect(c.x | 0, (c.y + 1) | 0, Math.max(1, Math.abs(c.len)), 1);
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawRain(t, dt) {
+        var horizon = H * 0.72;
+        var rainBudget = Math.floor(rain.length * (1 - eco * 0.45));
+        var motion = reduceMotion ? 0.25 : 1;
+        ctx.lineWidth = 1;
+
+        for (var i = 0; i < rainBudget; i++) {
+          var r = rain[i];
+          var off = interactionOffsetFor(r.x, r.y, t, Math.min(W, H) * 0.35);
+
+          r.y += r.sp * dt * motion;
+          r.x += r.drift * dt * motion;
+
+          if (r.y > H + r.len) {
+            // 落地溅射
+            if (Math.random() < 0.55 && splashes.length < 220) {
+              var n = 2 + (Math.random() * 3 | 0);
+              for (var k = 0; k < n; k++) {
+                splashes.push({
+                  x: r.x, y: H - 1,
+                  vx: rand(-W * 0.012, W * 0.012),
+                  vy: rand(-H * 0.05, -H * 0.012),
+                  life: 1
+                });
+              }
+            }
+            r.y = -r.len - rand(0, H * 0.2);
+            r.x = rand(0, W);
+          }
+          if (r.x < -W * 0.05) r.x = W * 1.05;
+          if (r.x > W * 1.05) r.x = -W * 0.05;
+
+          var rx = r.x + off.x * 1.6;
+          var ry = r.y + off.y * 1.6;
+
+          if (ry < horizon) {
+            ctx.globalAlpha = r.a * 0.55;
+            ctx.strokeStyle = 'rgba(150,220,255,0.9)';
+          } else {
+            ctx.globalAlpha = r.a;
+            ctx.strokeStyle = CYAN;
+          }
+
+          ctx.beginPath();
+          ctx.moveTo(rx | 0, ry | 0);
+          ctx.lineTo((rx + r.drift * 0.15) | 0, (ry + r.len) | 0);
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+
+        // 溅射点
+        for (var s = splashes.length - 1; s >= 0; s--) {
+          var sp = splashes[s];
+          sp.vy += H * 0.9 * dt;
+          sp.x += sp.vx * dt;
+          sp.y += sp.vy * dt;
+          sp.life -= dt * 2.6;
+          if (sp.life <= 0 || sp.y > H) {
+            splashes.splice(s, 1);
+            continue;
+          }
+          ctx.globalAlpha = sp.life * 0.7;
+          ctx.fillStyle = '#b9ecff';
+          ctx.fillRect(sp.x | 0, sp.y | 0, 1, 1);
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawRipples(t) {
+        for (var i = 0; i < ripples.length; i++) {
+          var r = ripples[i];
+          var age = t - r.born;
+          if (age < 0 || age > RIPPLE_LIFE) continue;
+          var prog = age / RIPPLE_LIFE;
+          var radius = Math.max(W, H) * 0.9 * (1 - Math.pow(1 - prog, 2)) * (r.power || 1);
+          var alpha = (1 - prog) * 0.75;
+
+          ctx.globalAlpha = alpha;
+          ctx.strokeStyle = CYAN;
+          ctx.lineWidth = Math.max(1, 2 * (1 - prog));
+          ctx.beginPath();
+          ctx.arc(r.x, r.y, radius, 0, Math.PI * 2);
+          ctx.stroke();
+
+          ctx.globalAlpha = alpha * 0.5;
+          ctx.strokeStyle = PINK;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.arc(r.x, r.y, radius * 0.62, 0, Math.PI * 2);
+          ctx.stroke();
+
+          ctx.globalAlpha = (1 - prog) * 0.9;
+          ctx.fillStyle = '#ffffff';
+          var cr = Math.max(1, (1 - prog) * Math.min(W, H) * 0.012);
+          ctx.fillRect((r.x - cr) | 0, (r.y - cr) | 0, Math.ceil(cr * 2), Math.ceil(cr * 2));
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawPointerGlow() {
+        if (!pointer.active) return;
+        var radius = Math.min(W, H) * (pointer.down ? 0.28 : 0.2);
+        var g = ctx.createRadialGradient(pointer.x, pointer.y, 0, pointer.x, pointer.y, radius);
+        var inten = pointer.down ? 0.22 : 0.14;
+        g.addColorStop(0, 'rgba(34,211,238,' + inten + ')');
+        g.addColorStop(0.5, 'rgba(34,211,238,' + (inten * 0.4) + ')');
+        g.addColorStop(1, 'rgba(34,211,238,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(pointer.x - radius, pointer.y - radius, radius * 2, radius * 2);
+      }
+
+      function drawScanlines() {
+        if (eco > 0.5) return;
+        ctx.globalAlpha = 0.045;
+        ctx.fillStyle = '#000000';
+        for (var y = 0; y < H; y += 3) ctx.fillRect(0, y, W, 1);
+        ctx.globalAlpha = 1;
+      }
+
+      function drawVignette() {
+        if (eco > 0.9) return;
+        var vg = ctx.createRadialGradient(W * 0.5, H * 0.5, Math.min(W, H) * 0.3, W * 0.5, H * 0.5, Math.max(W, H) * 0.75);
+        vg.addColorStop(0, 'rgba(0,0,0,0)');
+        vg.addColorStop(1, 'rgba(0,0,0,0.55)');
+        ctx.fillStyle = vg;
+        ctx.fillRect(0, 0, W, H);
+      }
+
+      // ---------- 主循环 ----------
+      function frame(now) {
+        var idle = now - lastInput;
+        var target = idle > 4500 ? 1 : 0;
+        eco += (target - eco) * 0.045;
+
+        var step = 1000 / (60 - eco * 30);
+        if (now - lastDraw < step - 1) {
+          requestAnimationFrame(frame);
+          return;
+        }
+
+        var dt = Math.min(0.1, (now - lastDraw) / 1000);
+        lastDraw = now;
+        if (!reduceMotion) time += dt;
+        else time += dt * 0.35;
+
+        camZ += dt * 0.035 * (1 - eco * 0.5) * (reduceMotion ? 0.2 : 1);
+
+        for (var i = ripples.length - 1; i >= 0; i--) {
+          if (time - ripples[i].born > RIPPLE_LIFE) ripples.splice(i, 1);
+        }
+
+        ctx.globalAlpha = 1;
+        drawSky(time);
+        drawGround(time);
+        drawBuildings(time);
+        drawNeonSigns(time);
+        drawCars(time, dt);
+        drawRain(time, dt);
+        drawPointerGlow();
+        drawRipples(time);
+        drawScanlines();
+        drawVignette();
+
+        requestAnimationFrame(frame);
+      }
+
+      resize();
+      lastDraw = performance.now();
+      requestAnimationFrame(frame);
+    })();
+  </script>
+</body>
+
+</html>

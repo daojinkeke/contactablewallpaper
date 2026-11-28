@@ -19,11 +19,26 @@
       cursor: crosshair;
       user-select: none;
       -webkit-user-select: none;
+      animation: appear 1.6s ease .1s both;
+    }
+
+    @keyframes appear {
+      from {
+        opacity: 0;
+      }
+
+      to {
+        opacity: 1;
+      }
     }
 
     #scene {
       position: fixed;
       inset: 0;
+      /* canvas 是替换元素，仅靠 inset 无法撑满视口：width/height:auto 会退回
+         画布属性的固有尺寸（W×DPR），在非 1 倍缩放下画面被放大裁切、点击偏移。 */
+      width: 100%;
+      height: 100%;
       display: block;
     }
 
@@ -34,12 +49,23 @@
       background:
         radial-gradient(100% 90% at 50% 52%, rgba(0, 0, 0, 0) 36%, rgba(0, 0, 0, .34) 74%, rgba(0, 0, 0, .72) 100%);
     }
+
+    .grain {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .045;
+      mix-blend-mode: overlay;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+      background-size: 160px 160px;
+    }
   </style>
 </head>
 
 <body>
   <canvas id="scene"></canvas>
   <div class="vignette"></div>
+  <div class="grain"></div>
 
   <script>
     (function () {
@@ -50,20 +76,27 @@
       var ctx = canvas.getContext('2d', { alpha: false });
       var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-      var W = 0, H = 0, dpr = 1, bg = null;
+      var W = 0, H = 0, dpr = 1;
+      var bg = null;
       var pointer = { x: 0.5, y: 0.5, sx: 0.5, sy: 0.5, active: false };
-      var flies = [], bokeh = [], gusts = [];
-      var glowSprite = null;
-      var lastInput = performance.now(), eco = 0, lastDraw = 0, time = 0;
-      var breeze = 0;
 
-      function markInput() {
-        lastInput = performance.now();
-        eco = 0;
+      var flies = [], bokeh = [], pollen = [], gusts = [];
+      var glowSprite = null;
+
+      var lastInput = performance.now(), eco = 0, lastDraw = 0, time = 0;
+      var breeze = 0, windDir = 1;
+
+      function clamp(v, a, b) {
+        return v < a ? a : (v > b ? b : v);
       }
 
       function rand(a, b) {
         return a + Math.random() * (b - a);
+      }
+
+      function markInput() {
+        lastInput = performance.now();
+        eco = 0;
       }
 
       function buildGlow() {
@@ -72,98 +105,129 @@
         glowSprite.height = 64;
         var g = glowSprite.getContext('2d');
         var grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
-        grad.addColorStop(0, 'rgba(255, 255, 214, 1)');
-        grad.addColorStop(0.22, 'rgba(214, 255, 170, 0.62)');
-        grad.addColorStop(0.6, 'rgba(120, 230, 130, 0.16)');
+        grad.addColorStop(0, 'rgba(255, 255, 216, 1)');
+        grad.addColorStop(0.18, 'rgba(224, 255, 168, 0.72)');
+        grad.addColorStop(0.5, 'rgba(132, 236, 128, 0.22)');
         grad.addColorStop(1, 'rgba(60, 180, 90, 0)');
         g.fillStyle = grad;
         g.fillRect(0, 0, 64, 64);
       }
 
       function resize() {
-        W = window.innerWidth;
-        H = window.innerHeight;
+        var rect = canvas.getBoundingClientRect();
+        W = rect.width || window.innerWidth;
+        H = rect.height || window.innerHeight;
         dpr = Math.min(2, window.devicePixelRatio || 1);
         canvas.width = Math.round(W * dpr);
         canvas.height = Math.round(H * dpr);
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-        bg = ctx.createRadialGradient(W * 0.5, H * 0.55, 0, W * 0.5, H * 0.55, Math.max(W, H) * 0.75);
-        bg.addColorStop(0, '#0d1a10');
-        bg.addColorStop(0.5, '#08110b');
-        bg.addColorStop(1, '#030604');
+        bg = ctx.createRadialGradient(W * 0.5, H * 0.52, 0, W * 0.5, H * 0.52, Math.max(W, H) * 0.8);
+        bg.addColorStop(0, '#0f1f13');
+        bg.addColorStop(0.48, '#08120b');
+        bg.addColorStop(1, '#020503');
 
         makeBokeh();
         makeFlies();
+        makePollen();
       }
 
       function makeBokeh() {
         bokeh = [];
-        for (var i = 0; i < 12; i++) {
+        var count = W > 1200 ? 16 : 11;
+        for (var i = 0; i < count; i++) {
           bokeh.push({
             x: Math.random(),
-            y: rand(0.2, 0.9),
-            r: rand(0.03, 0.11),
-            speed: rand(0.002, 0.007),
+            y: rand(0.12, 0.9),
+            r: rand(0.03, 0.12),
+            speed: rand(0.002, 0.008),
             phase: rand(0, TAU),
-            alpha: rand(0.025, 0.07)
+            alpha: rand(0.02, 0.075),
+            hue: rand(74, 118)
           });
         }
       }
 
       function makeFlies() {
-        var count = Math.round(Math.min(80, Math.max(28, W * H / 26000)));
+        var count = Math.round(clamp(W * H / 22000, 30, 90));
         flies = [];
         for (var i = 0; i < count; i++) {
           flies.push({
             x: Math.random(),
-            y: rand(0.15, 1),
-            vx: rand(-0.01, 0.01),
-            vy: rand(-0.008, 0.008),
-            size: rand(0.5, 1.5),
+            y: rand(0.18, 1),
+            vx: rand(-0.012, 0.012),
+            vy: rand(-0.01, 0.01),
+            px: 0,
+            py: 0,
+            size: rand(0.5, 1.6),
             phase: rand(0, TAU),
-            blink: rand(0.4, 1.6),
-            hue: rand(64, 96)
+            blink: rand(0.4, 1.7),
+            hue: rand(62, 98),
+            z: rand(0.4, 1)
           });
         }
       }
 
-      function scatter(nx, ny) {
-        var cx = nx, cy = ny;
+      function makePollen() {
+        var count = Math.round(clamp(W * H / 40000, 20, 70));
+        pollen = [];
+        for (var i = 0; i < count; i++) {
+          pollen.push({
+            x: Math.random(),
+            y: Math.random(),
+            vy: rand(-0.006, 0.004),
+            vx: rand(-0.004, 0.004),
+            size: rand(0.5, 1.4),
+            alpha: rand(0.08, 0.3),
+            phase: rand(0, TAU)
+          });
+        }
+      }
+
+      function scatter(nx, ny, power) {
         for (var i = 0; i < flies.length; i++) {
           var f = flies[i];
-          var dx = f.x - cx, dy = f.y - cy;
+          var dx = f.x - nx;
+          var dy = f.y - ny;
           var d = Math.sqrt(dx * dx + dy * dy) + 0.001;
-          if (d < 0.34) {
-            var force = (0.34 - d) * 0.5;
+          if (d < 0.36) {
+            var force = (0.36 - d) * 0.55 * power;
             f.vx += dx / d * force;
             f.vy += dy / d * force;
           }
         }
-        gusts.push({ x: cx, y: cy, r: 0, life: 1 });
+        gusts.push({ x: nx, y: ny, r: 0, life: 1 });
+        breeze = 1;
       }
 
       function update(dt) {
         pointer.sx += (pointer.x - pointer.sx) * Math.min(1, dt * 3);
         pointer.sy += (pointer.y - pointer.sy) * Math.min(1, dt * 3);
-        breeze = Math.max(0, breeze - dt * 0.5);
-        var wanderScale = 1 + breeze * 1.6;
+        breeze = Math.max(0, breeze - dt * 0.55);
+        if (reduceMotion) return;
 
+        var wanderScale = 1 + breeze * 1.5;
         for (var i = 0; i < flies.length; i++) {
           var f = flies[i];
-          f.vx += (Math.random() - 0.5) * 0.0035 * dt * wanderScale;
-          f.vy += (Math.random() - 0.5) * 0.0035 * dt * wanderScale;
-          f.vx *= 0.985;
-          f.vy *= 0.985;
+          f.px = f.x;
+          f.py = f.y;
+
+          f.vx += (Math.random() - 0.5) * 0.0038 * dt * wanderScale;
+          f.vy += (Math.random() - 0.5) * 0.0038 * dt * wanderScale;
+          f.vx += windDir * (0.0012 + breeze * 0.006) * dt;
+          f.vx *= Math.pow(0.5, dt);
+          f.vy *= Math.pow(0.5, dt);
+
           if (pointer.active) {
             var dx = pointer.sx - f.x;
             var dy = pointer.sy - f.y;
             var d = Math.sqrt(dx * dx + dy * dy) + 0.001;
-            if (d < 0.28) {
-              f.vx += dx / d * 0.0026 * dt;
-              f.vy += dy / d * 0.0026 * dt;
+            if (d < 0.3) {
+              f.vx += dx / d * 0.006 * dt * (1 - d / 0.3);
+              f.vy += dy / d * 0.006 * dt * (1 - d / 0.3);
             }
           }
+
           f.x += f.vx;
           f.y += f.vy;
           if (f.x < 0.02) { f.x = 0.02; f.vx = Math.abs(f.vx); }
@@ -172,11 +236,21 @@
           if (f.y > 0.98) { f.y = 0.98; f.vy = -Math.abs(f.vy); }
         }
 
-        for (var j = gusts.length - 1; j >= 0; j--) {
-          var g = gusts[j];
-          g.r += dt * 0.5;
-          g.life -= dt * 0.7;
-          if (g.life <= 0) gusts.splice(j, 1);
+        for (var j = 0; j < pollen.length; j++) {
+          var p = pollen[j];
+          p.x += (p.vx + windDir * (0.001 + breeze * 0.004)) * dt * 60;
+          p.y += (p.vy + Math.sin(time * 0.5 + p.phase) * 0.002) * dt * 60;
+          if (p.x < -0.02) p.x = 1.02;
+          if (p.x > 1.02) p.x = -0.02;
+          if (p.y < -0.02) p.y = 1.02;
+          if (p.y > 1.02) p.y = -0.02;
+        }
+
+        for (var k = gusts.length - 1; k >= 0; k--) {
+          var g = gusts[k];
+          g.r += dt * 0.42;
+          g.life -= dt * 0.66;
+          if (g.life <= 0) gusts.splice(k, 1);
         }
       }
 
@@ -185,64 +259,131 @@
         ctx.fillStyle = bg;
         ctx.fillRect(0, 0, W, H);
 
-        ctx.globalCompositeOperation = 'lighter';
+        // 背景散景
         for (var i = 0; i < bokeh.length; i++) {
           var b = bokeh[i];
-          b.x += 0;
           var bx = (b.x + Math.sin(time * b.speed * 6 + b.phase) * 0.02) * W;
           var by = (b.y + Math.cos(time * b.speed * 5 + b.phase) * 0.012) * H;
           var br = b.r * Math.min(W, H);
           var grad = ctx.createRadialGradient(bx, by, 0, bx, by, br);
-          grad.addColorStop(0, 'rgba(150, 255, 170, ' + b.alpha + ')');
-          grad.addColorStop(1, 'rgba(60, 160, 90, 0)');
+          grad.addColorStop(0, 'hsla(' + b.hue + ', 92%, 72%, ' + b.alpha + ')');
+          grad.addColorStop(0.7, 'hsla(' + b.hue + ', 88%, 62%, ' + (b.alpha * 0.3) + ')');
+          grad.addColorStop(1, 'hsla(' + b.hue + ', 84%, 56%, 0)');
           ctx.fillStyle = grad;
           ctx.beginPath();
           ctx.arc(bx, by, br, 0, TAU);
           ctx.fill();
         }
-
-        for (var j = 0; j < flies.length; j++) {
-          var f = flies[j];
-          var pulse = 0.55 + 0.45 * Math.sin(time * f.blink * 2.2 + f.phase);
-          var size = f.size * Math.min(W, H) * 0.009 * (0.75 + pulse * 0.5);
-          ctx.globalAlpha = pulse;
-          ctx.drawImage(glowSprite, f.x * W - size, f.y * H - size, size * 2, size * 2);
-          ctx.globalAlpha = 1;
-        }
         ctx.globalCompositeOperation = 'source-over';
 
+        // 花粉
+        ctx.globalCompositeOperation = 'lighter';
+        for (var p = 0; p < pollen.length; p++) {
+          var po = pollen[p];
+          ctx.globalAlpha = po.alpha * (0.6 + 0.4 * Math.sin(time + po.phase));
+          ctx.fillStyle = '#dfffc8';
+          ctx.beginPath();
+          ctx.arc(po.x * W, po.y * H, po.size, 0, TAU);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+
+        // 萤火拖尾：按速度方向拉出一小段光尾，静止时自然收短
+        for (var f = 0; f < flies.length; f++) {
+          var fl = flies[f];
+          var sp = Math.sqrt(fl.vx * fl.vx + fl.vy * fl.vy);
+          var nx = sp > 0.0001 ? fl.vx / sp : 0;
+          var ny = sp > 0.0001 ? fl.vy / sp : 0;
+          var tl = Math.min(52, 10 + sp * 1500) * (0.6 + fl.z * 0.6);
+          var cx = fl.x * W;
+          var cy = fl.y * H;
+          var tx = cx - nx * tl;
+          var ty = cy - ny * tl;
+          var pulse = 0.5 + 0.5 * Math.sin(time * fl.blink * 2.2 + fl.phase);
+          var tailA = pulse * 0.3 * fl.z;
+
+          ctx.strokeStyle = 'hsla(' + fl.hue + ', 96%, 76%, ' + tailA + ')';
+          ctx.lineWidth = Math.max(0.6, fl.size * 1.4);
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(tx, ty);
+          ctx.lineTo(cx, cy);
+          ctx.stroke();
+        }
+
+        // 萤火本体
+        for (var g = 0; g < flies.length; g++) {
+          var f2 = flies[g];
+          var pulse2 = 0.5 + 0.5 * Math.sin(time * f2.blink * 2.2 + f2.phase);
+          var size = f2.size * Math.min(W, H) * 0.011 * (0.6 + pulse2 * 0.8) * (0.6 + f2.z * 0.6);
+          ctx.globalAlpha = 0.35 + pulse2 * 0.65;
+          ctx.drawImage(glowSprite, f2.x * W - size, f2.y * H - size, size * 2, size * 2);
+        }
+        ctx.globalAlpha = 1;
+
+        // 风圈
         for (var k = 0; k < gusts.length; k++) {
-          var g = gusts[k];
-          ctx.strokeStyle = 'rgba(190, 255, 190, ' + (g.life * 0.18) + ')';
+          var gu = gusts[k];
+          ctx.strokeStyle = 'rgba(186, 255, 186, ' + (gu.life * 0.16) + ')';
           ctx.lineWidth = 1;
           ctx.beginPath();
-          ctx.arc(g.x * W, g.y * H, g.r * Math.max(W, H) * 0.5, 0, TAU);
+          ctx.arc(gu.x * W, gu.y * H, gu.r * Math.max(W, H) * 0.5, 0, TAU);
           ctx.stroke();
+        }
+
+        ctx.globalCompositeOperation = 'source-over';
+
+        // 指针微光
+        if (pointer.active) {
+          ctx.globalCompositeOperation = 'lighter';
+          var gx = pointer.sx * W;
+          var gy = pointer.sy * H;
+          var halo = ctx.createRadialGradient(gx, gy, 0, gx, gy, Math.max(W, H) * 0.13);
+          halo.addColorStop(0, 'rgba(198, 255, 186, 0.08)');
+          halo.addColorStop(1, 'rgba(120, 220, 130, 0)');
+          ctx.fillStyle = halo;
+          ctx.fillRect(0, 0, W, H);
+          ctx.globalCompositeOperation = 'source-over';
         }
       }
 
       function frame(now) {
         var idle = now - lastInput;
-        var target = idle > 4000 ? 1 : 0;
-        eco += (target - eco) * 0.05;
-        var targetFps = 60 - eco * 40;
-        var step = 1000 / targetFps;
+        var target = idle > 4500 ? 1 : 0;
+        eco += (target - eco) * 0.045;
+        var step = 1000 / (60 - eco * 30);
         if (now - lastDraw < step - 1) {
           requestAnimationFrame(frame);
           return;
         }
         var dt = Math.min(0.1, (now - lastDraw) / 1000);
         lastDraw = now;
-        time += reduceMotion ? 0 : dt;
+        if (!reduceMotion) time += dt;
         update(dt);
         draw();
         requestAnimationFrame(frame);
       }
 
+      // 事件坐标统一换算为画布内的 0~1 比例，兼容 DPR、缩放与画布偏移。
+      function toLocal(e) {
+        var rect = canvas.getBoundingClientRect();
+        var sx = W / Math.max(1, rect.width);
+        var sy = H / Math.max(1, rect.height);
+        var lx = e.clientX - rect.left;
+        var ly = e.clientY - rect.top;
+        return {
+          x: clamp(lx / Math.max(1, rect.width), 0, 1),
+          y: clamp(ly / Math.max(1, rect.height), 0, 1),
+          px: lx * sx,
+          py: ly * sy
+        };
+      }
+
       window.addEventListener('resize', resize);
       window.addEventListener('pointermove', function (e) {
-        pointer.x = e.clientX / Math.max(1, W);
-        pointer.y = e.clientY / Math.max(1, H);
+        var p = toLocal(e);
+        pointer.x = p.x;
+        pointer.y = p.y;
         pointer.active = true;
         markInput();
       });
@@ -252,25 +393,30 @@
         pointer.y = 0.5;
       });
       window.addEventListener('pointerdown', function (e) {
-        scatter(e.clientX / Math.max(1, W), e.clientY / Math.max(1, H));
+        var p = toLocal(e);
+        scatter(p.x, p.y, 1);
         markInput();
       });
       window.addEventListener('keydown', function (e) {
         if (e.key === ' ' || e.key === 'Enter') {
-          breeze = 1;
+          breeze = 1.4;
           for (var i = 0; i < flies.length; i++) {
-            flies[i].vx += rand(-0.02, 0.02);
-            flies[i].vy += rand(-0.016, 0.016);
+            flies[i].vx += rand(-0.03, 0.03);
+            flies[i].vy += rand(-0.022, 0.022);
           }
-        } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-          var dir = e.key === 'ArrowLeft' ? -1 : 1;
-          for (var j = 0; j < flies.length; j++) flies[j].vx += dir * 0.006;
+        } else if (e.key === 'ArrowLeft') {
+          windDir = -1;
+        } else if (e.key === 'ArrowRight') {
+          windDir = 1;
+        } else if (e.key === 'ArrowUp') {
+          for (var j = 0; j < flies.length; j++) flies[j].vy = Math.max(-0.03, flies[j].vy - 0.004);
         }
         markInput();
       });
 
       buildGlow();
       resize();
+      // 先同步绘制一帧，避免后台节流或截图时出现空白。
       frame(performance.now());
     })();
   </script>

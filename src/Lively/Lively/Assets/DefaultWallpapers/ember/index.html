@@ -19,11 +19,26 @@
       cursor: crosshair;
       user-select: none;
       -webkit-user-select: none;
+      animation: appear 1.6s ease .1s both;
+    }
+
+    @keyframes appear {
+      from {
+        opacity: 0;
+      }
+
+      to {
+        opacity: 1;
+      }
     }
 
     #scene {
       position: fixed;
       inset: 0;
+      /* canvas 是替换元素，仅靠 inset 无法撑满视口：width/height:auto 会退回
+         画布属性的固有尺寸（W×DPR），在非 1 倍缩放下画面被放大裁切、点击偏移。 */
+      width: 100%;
+      height: 100%;
       display: block;
     }
 
@@ -35,12 +50,23 @@
         radial-gradient(120% 86% at 50% 58%, rgba(0, 0, 0, 0) 34%, rgba(0, 0, 0, .34) 72%, rgba(0, 0, 0, .72) 100%),
         linear-gradient(180deg, rgba(0, 0, 0, .42), rgba(0, 0, 0, 0) 26%);
     }
+
+    .grain {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .05;
+      mix-blend-mode: overlay;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+      background-size: 160px 160px;
+    }
   </style>
 </head>
 
 <body>
   <canvas id="scene"></canvas>
   <div class="vignette"></div>
+  <div class="grain"></div>
 
   <script>
     (function () {
@@ -51,110 +77,225 @@
       var ctx = canvas.getContext('2d', { alpha: false });
       var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-      var W = 0, H = 0, dpr = 1, bg = null, heat = null;
+      var W = 0, H = 0, dpr = 1;
+      var bg = null, heat = null;
       var pointer = { x: 0.5, y: 0.5, sx: 0.5, sy: 0.5, active: false };
-      var embers = [], sparks = [];
-      var lastInput = performance.now(), eco = 0, lastDraw = 0, time = 0, wind = 0;
 
-      function markInput() {
-        lastInput = performance.now();
-        eco = 0;
+      var embers = [], sparks = [], ash = [], smoke = [], rings = [];
+      var cracks = [];
+      var glowSprite = null, smokeSprite = null;
+
+      var lastInput = performance.now(), eco = 0, lastDraw = 0, time = 0;
+      var wind = 0, windPower = 1, surge = 0;
+
+      function clamp(v, a, b) {
+        return v < a ? a : (v > b ? b : v);
       }
 
       function rand(a, b) {
         return a + Math.random() * (b - a);
       }
 
+      function markInput() {
+        lastInput = performance.now();
+        eco = 0;
+      }
+
+      function buildSprites() {
+        glowSprite = document.createElement('canvas');
+        glowSprite.width = 64;
+        glowSprite.height = 64;
+        var g = glowSprite.getContext('2d');
+        var grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+        grad.addColorStop(0, 'rgba(255, 244, 210, 1)');
+        grad.addColorStop(0.22, 'rgba(255, 186, 92, 0.78)');
+        grad.addColorStop(0.55, 'rgba(240, 108, 38, 0.24)');
+        grad.addColorStop(1, 'rgba(160, 40, 10, 0)');
+        g.fillStyle = grad;
+        g.fillRect(0, 0, 64, 64);
+
+        smokeSprite = document.createElement('canvas');
+        smokeSprite.width = 96;
+        smokeSprite.height = 96;
+        var s = smokeSprite.getContext('2d');
+        var sg = s.createRadialGradient(48, 48, 0, 48, 48, 48);
+        sg.addColorStop(0, 'rgba(132, 74, 44, 0.16)');
+        sg.addColorStop(0.5, 'rgba(92, 48, 32, 0.08)');
+        sg.addColorStop(1, 'rgba(50, 26, 18, 0)');
+        s.fillStyle = sg;
+        s.fillRect(0, 0, 96, 96);
+      }
+
       function resize() {
-        W = window.innerWidth;
-        H = window.innerHeight;
+        var rect = canvas.getBoundingClientRect();
+        W = rect.width || window.innerWidth;
+        H = rect.height || window.innerHeight;
         dpr = Math.min(2, window.devicePixelRatio || 1);
         canvas.width = Math.round(W * dpr);
         canvas.height = Math.round(H * dpr);
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.imageSmoothingEnabled = true;
 
         bg = ctx.createLinearGradient(0, 0, 0, H);
-        bg.addColorStop(0, '#050202');
-        bg.addColorStop(0.55, '#0c0503');
-        bg.addColorStop(1, '#1a0904');
+        bg.addColorStop(0, '#040202');
+        bg.addColorStop(0.45, '#0b0503');
+        bg.addColorStop(0.82, '#1a0904');
+        bg.addColorStop(1, '#291006');
 
-        heat = ctx.createRadialGradient(W * 0.5, H * 1.04, 0, W * 0.5, H * 1.04, H * 0.82);
-        heat.addColorStop(0, 'rgba(255, 116, 38, 0.20)');
-        heat.addColorStop(0.45, 'rgba(180, 54, 16, 0.08)');
+        heat = ctx.createRadialGradient(W * 0.5, H * 1.06, 0, W * 0.5, H * 1.06, H * 0.9);
+        heat.addColorStop(0, 'rgba(255, 122, 42, 0.22)');
+        heat.addColorStop(0.42, 'rgba(184, 58, 18, 0.085)');
         heat.addColorStop(1, 'rgba(0, 0, 0, 0)');
 
         makeEmbers();
+        makeAsh();
+        makeSmoke();
+        makeCracks();
       }
 
       function makeEmbers() {
-        var count = Math.round(Math.min(320, Math.max(90, W * H / 8200)));
+        var count = Math.round(clamp(W * H / 7600, 110, 360));
         embers = [];
         for (var i = 0; i < count; i++) {
           embers.push({
             x: Math.random(),
-            y: Math.random(),
-            vy: rand(0.012, 0.045),
-            drift: rand(0.004, 0.02),
-            size: rand(0.7, 2.4),
+            y: 1 - Math.pow(Math.random(), 1.7),
+            px: 0,
+            py: 0,
+            vy: rand(0.014, 0.052),
+            drift: rand(0.004, 0.022),
+            size: rand(0.7, 2.6),
             phase: rand(0, TAU),
-            speed: rand(0.5, 1.7),
-            hue: rand(16, 38),
-            alpha: rand(0.25, 0.9),
-            pull: rand(0.2, 1.0)
+            speed: rand(0.5, 1.9),
+            hue: rand(14, 42),
+            alpha: rand(0.22, 0.92),
+            pull: rand(0.2, 1)
           });
         }
       }
 
-      function spawnBurst(n, x, y) {
-        for (var i = 0; i < n; i++) {
-          var a = Math.random() * TAU;
-          var v = rand(0.04, 0.22);
-          sparks.push({
-            x: x,
-            y: y,
-            vx: Math.cos(a) * v,
-            vy: Math.sin(a) * v - rand(0.02, 0.09),
-            life: 1,
-            decay: rand(0.6, 1.6),
-            size: rand(0.8, 2.6),
-            hue: rand(18, 44)
+      function makeAsh() {
+        var count = Math.round(clamp(W * H / 26000, 24, 90));
+        ash = [];
+        for (var i = 0; i < count; i++) {
+          ash.push({
+            x: Math.random(),
+            y: Math.random(),
+            vy: rand(0.004, 0.018),
+            sway: rand(0.3, 1.2),
+            phase: rand(0, TAU),
+            size: rand(0.5, 1.5),
+            alpha: rand(0.08, 0.26)
           });
         }
+      }
+
+      function makeSmoke() {
+        smoke = [];
+        for (var i = 0; i < 14; i++) {
+          smoke.push({
+            x: Math.random(),
+            y: rand(0.2, 1),
+            r: rand(0.12, 0.34),
+            vy: rand(0.004, 0.016),
+            drift: rand(-0.01, 0.01),
+            alpha: rand(0.35, 0.9),
+            phase: rand(0, TAU)
+          });
+        }
+      }
+
+      function makeCracks() {
+        cracks = [];
+        var n = W > 1100 ? 4 : 3;
+        for (var i = 0; i < n; i++) {
+          var pts = [];
+          var x = rand(0.08, 0.92) * W;
+          var y = H + rand(1, 9);
+          var len = rand(0.06, 0.15) * W;
+          var dir = Math.random() > 0.5 ? 1 : -1;
+          var seg = 12;
+          var arc = rand(10, 24);
+          var phase = rand(0, TAU);
+          var jag = rand(1.5, 4);
+          for (var j = 0; j <= seg; j++) {
+            var u = j / seg;
+            pts.push({
+              x: x + dir * u * len,
+              y: y - Math.sin(u * Math.PI) * arc + Math.sin(u * 11 + phase) * jag
+            });
+          }
+          cracks.push({ pts: pts, phase: phase, speed: rand(0.3, 0.9), hue: rand(16, 34) });
+        }
+      }
+
+      function spawnBurst(n, nx, ny, power) {
+        for (var i = 0; i < n; i++) {
+          var a = Math.random() * TAU;
+          var v = rand(0.04, 0.26) * power;
+          sparks.push({
+            x: nx,
+            y: ny,
+            px: nx,
+            py: ny,
+            vx: Math.cos(a) * v,
+            vy: Math.sin(a) * v - rand(0.02, 0.1),
+            life: 1,
+            decay: rand(0.55, 1.5),
+            size: rand(0.7, 2.8),
+            hue: rand(16, 46)
+          });
+        }
+        rings.push({ x: nx, y: ny, r: 4, life: 1, hue: rand(18, 36) });
+        surge = 1;
       }
 
       function update(dt) {
         pointer.sx += (pointer.x - pointer.sx) * Math.min(1, dt * 3.4);
         pointer.sy += (pointer.y - pointer.sy) * Math.min(1, dt * 3.4);
-        wind = Math.sin(time * 0.22) * 0.6 + Math.sin(time * 0.07) * 0.4;
+        surge *= Math.pow(0.12, dt);
+        if (reduceMotion) return;
 
-        var px = pointer.sx, py = pointer.sy;
-        var pullX = (px - 0.5) * 0.02;
-        var pullY = (py - 0.5) * 0.012;
+        wind = Math.sin(time * 0.2) * 0.6 + Math.sin(time * 0.063) * 0.4;
+        var px = pointer.sx;
+        var py = pointer.sy;
+        var pullX = (px - 0.5) * 0.016 * windPower;
+        var pullY = (py - 0.5) * 0.01 * windPower;
         var boost = pointer.active ? 1 : 0;
+        var heatScale = 1 + surge * 1.6;
 
         for (var i = 0; i < embers.length; i++) {
           var e = embers[i];
+          e.px = e.x;
+          e.py = e.y;
+
           var dx = px - e.x;
           var dy = py - e.y;
-          var d2 = dx * dx + dy * dy;
-          var influence = Math.max(0, 1 - Math.sqrt(d2) * 2.4) * e.pull;
-          e.y -= e.vy * dt * (0.7 + e.alpha);
-          e.x += (e.drift * Math.sin(time * e.speed + e.phase) + pullX) * dt;
+          var dist = Math.sqrt(dx * dx + dy * dy);
+          var influence = Math.max(0, 1 - dist * 2.8) * e.pull;
+
+          e.y -= e.vy * dt * (0.7 + e.alpha) * heatScale;
+          e.x += (e.drift * Math.sin(time * e.speed + e.phase) + pullX + wind * 0.006) * dt;
           e.x += Math.cos(time * 0.6 + e.phase) * 0.0025 * dt;
+
           if (boost) {
-            e.x += dx * influence * 0.9 * dt;
-            e.y += dy * influence * 0.9 * dt;
+            e.x += dx * influence * 1.1 * dt;
+            e.y += dy * influence * 1.1 * dt;
           }
-          if (e.y < -0.04) {
+          if (e.y < -0.06) {
             e.y = 1.04;
             e.x = Math.random();
+            e.px = e.x;
+            e.py = e.y;
           }
-          if (e.x < -0.05) e.x = 1.05;
-          if (e.x > 1.05) e.x = -0.05;
+          if (e.x < -0.06) e.x = 1.06;
+          if (e.x > 1.06) e.x = -0.06;
         }
 
         for (var j = sparks.length - 1; j >= 0; j--) {
           var s = sparks[j];
+          s.px = s.x;
+          s.py = s.y;
           s.life -= dt * s.decay;
           if (s.life <= 0) {
             sparks.splice(j, 1);
@@ -163,54 +304,169 @@
           s.x += s.vx * dt;
           s.y += s.vy * dt;
           s.vy -= 0.035 * dt;
-          s.vx += wind * 0.004 * dt;
+          s.vx += wind * 0.005 * dt;
+        }
+
+        for (var k = 0; k < ash.length; k++) {
+          var a = ash[k];
+          a.y += a.vy * dt;
+          a.x += Math.sin(time * 0.5 + a.phase) * 0.002 * dt + wind * 0.002 * dt;
+          if (a.y > 1.05) {
+            a.y = -0.05;
+            a.x = Math.random();
+          }
+          if (a.x < -0.03) a.x = 1.03;
+          if (a.x > 1.03) a.x = -0.03;
+        }
+
+        for (var m = 0; m < smoke.length; m++) {
+          var sm = smoke[m];
+          sm.y -= sm.vy * dt;
+          sm.x += sm.drift * dt + wind * 0.0014 * dt;
+          if (sm.y < -0.4) {
+            sm.y = 1.25;
+            sm.x = Math.random();
+          }
+        }
+
+        for (var n = rings.length - 1; n >= 0; n--) {
+          var r = rings[n];
+          r.r += dt * Math.max(W, H) * 0.42;
+          r.life -= dt * 0.95;
+          if (r.life <= 0) rings.splice(n, 1);
         }
       }
 
-      function glowDot(x, y, r, hue, alpha) {
-        var g = ctx.createRadialGradient(x, y, 0, x, y, r);
-        g.addColorStop(0, 'rgba(255, 214, 166, ' + (alpha * 0.9) + ')');
-        g.addColorStop(0.35, 'hsla(' + hue + ', 92%, 60%, ' + (alpha * 0.45) + ')');
-        g.addColorStop(1, 'hsla(' + hue + ', 90%, 50%, 0)');
-        ctx.fillStyle = g;
-        ctx.beginPath();
-        ctx.arc(x, y, r, 0, TAU);
-        ctx.fill();
+      function drawCracks(t) {
+        ctx.globalCompositeOperation = 'lighter';
+        var widths = [26, 8, 1.6];
+        var alphas = [0.09, 0.2, 0.55];
+        for (var i = 0; i < cracks.length; i++) {
+          var c = cracks[i];
+          var pulse = 0.55 + 0.45 * Math.sin(t * c.speed + c.phase);
+          var a = (0.18 + pulse * 0.34) * (1 + surge);
+
+          for (var pass = 0; pass < 3; pass++) {
+            ctx.strokeStyle = 'hsla(' + c.hue + ', 96%, ' + (pass === 2 ? 78 : 62) + '%, ' +
+              (a * alphas[pass]) + ')';
+            ctx.lineWidth = widths[pass];
+            ctx.lineJoin = 'round';
+            ctx.lineCap = 'round';
+            ctx.beginPath();
+            for (var j = 0; j < c.pts.length; j++) {
+              if (j === 0) ctx.moveTo(c.pts[j].x, c.pts[j].y);
+              else ctx.lineTo(c.pts[j].x, c.pts[j].y);
+            }
+            ctx.stroke();
+          }
+        }
+        ctx.globalCompositeOperation = 'source-over';
       }
 
-      function draw() {
+      function draw(t) {
         ctx.globalCompositeOperation = 'source-over';
         ctx.fillStyle = bg;
         ctx.fillRect(0, 0, W, H);
 
+        // 烟雾：先铺一层暖灰，压住背景的纯黑。
         ctx.globalCompositeOperation = 'lighter';
+        for (var m = 0; m < smoke.length; m++) {
+          var sm = smoke[m];
+          var sr = sm.r * Math.min(W, H) * 1.6;
+          var sx = sm.x * W + Math.sin(t * 0.18 + sm.phase) * 22;
+          var sy = sm.y * H;
+          ctx.globalAlpha = sm.alpha * 0.8;
+          ctx.drawImage(smokeSprite, sx - sr, sy - sr, sr * 2, sr * 2);
+        }
+        ctx.globalAlpha = 1;
+
         ctx.fillStyle = heat;
         ctx.fillRect(0, 0, W, H);
 
+        // 余烬拖尾：上升的暖色火线，长度与倾角随火点自身漂移变化
         for (var i = 0; i < embers.length; i++) {
           var e = embers[i];
-          var flicker = 0.62 + 0.38 * Math.sin(time * e.speed * 1.8 + e.phase);
           var x = e.x * W;
           var y = e.y * H;
-          var a = e.alpha * flicker * (reduceMotion ? 0.8 : 1);
-          glowDot(x, y, Math.max(2, e.size * 5.5), e.hue, a);
-          ctx.fillStyle = 'hsla(' + e.hue + ', 96%, 74%, ' + a + ')';
+          var tail = (5 + e.size * 7) * (0.5 + e.alpha * 0.8) * (1 + surge * 0.5);
+          var lean = Math.sin(time * e.speed * 0.6 + e.phase) * tail * 0.35 + wind * 6;
+          var ta = e.alpha * 0.24 * (reduceMotion ? 0.5 : 1);
+          ctx.strokeStyle = 'hsla(' + e.hue + ', 96%, 62%, ' + ta + ')';
+          ctx.lineWidth = Math.max(0.5, e.size * 0.6);
           ctx.beginPath();
-          ctx.arc(x, y, Math.max(0.6, e.size), 0, TAU);
+          ctx.moveTo(x + lean, y + tail);
+          ctx.lineTo(x, y);
+          ctx.stroke();
+        }
+
+        // 余烬光点
+        for (var j = 0; j < embers.length; j++) {
+          var em = embers[j];
+          var flicker = reduceMotion ? 0.8 : 0.58 + 0.42 * Math.sin(t * em.speed * 1.8 + em.phase);
+          var ex = em.x * W;
+          var ey = em.y * H;
+          var alpha = em.alpha * flicker;
+          var size = Math.max(2, em.size * 5.6) * (1 + surge * 0.3);
+          ctx.globalAlpha = alpha;
+          ctx.drawImage(glowSprite, ex - size, ey - size, size * 2, size * 2);
+          ctx.fillStyle = 'hsla(' + em.hue + ', 100%, 78%, ' + alpha + ')';
+          ctx.beginPath();
+          ctx.arc(ex, ey, Math.max(0.5, em.size * 0.9), 0, TAU);
           ctx.fill();
         }
+        ctx.globalAlpha = 1;
 
-        for (var j = 0; j < sparks.length; j++) {
-          var s = sparks[j];
-          glowDot(s.x * W, s.y * H, Math.max(2, s.size * 6), s.hue, s.life * 0.85);
+        // 灰烬（非叠加，形成冷色对比）
+        ctx.globalCompositeOperation = 'source-over';
+        for (var k = 0; k < ash.length; k++) {
+          var a = ash[k];
+          ctx.globalAlpha = a.alpha;
+          ctx.fillStyle = '#9a8e86';
+          ctx.beginPath();
+          ctx.arc(a.x * W, a.y * H, a.size, 0, TAU);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+
+        ctx.globalCompositeOperation = 'lighter';
+
+        // 火星
+        for (var s = 0; s < sparks.length; s++) {
+          var sp = sparks[s];
+          var sa = sp.life * 0.9;
+          var ss = Math.max(2, sp.size * 6);
+          ctx.globalAlpha = sa;
+          ctx.drawImage(glowSprite, sp.x * W - ss, sp.y * H - ss, ss * 2, ss * 2);
+          ctx.strokeStyle = 'hsla(' + sp.hue + ', 100%, 72%, ' + (sa * 0.75) + ')';
+          ctx.lineWidth = Math.max(0.6, sp.size * 0.8);
+          ctx.beginPath();
+          ctx.moveTo(sp.px * W, sp.py * H);
+          ctx.lineTo(sp.x * W, sp.y * H);
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+
+        // 冲击环
+        for (var r = 0; r < rings.length; r++) {
+          var ring = rings[r];
+          ctx.strokeStyle = 'hsla(' + ring.hue + ', 96%, 70%, ' + (ring.life * 0.42) + ')';
+          ctx.lineWidth = 1.2 + ring.life * 2.6;
+          ctx.beginPath();
+          ctx.arc(ring.x * W, ring.y * H, ring.r, 0, TAU);
+          ctx.stroke();
         }
 
+        drawCracks(t);
+
+        // 指针热晕
         if (pointer.active) {
           var gx = pointer.sx * W;
           var gy = pointer.sy * H;
-          var halo = ctx.createRadialGradient(gx, gy, 0, gx, gy, Math.max(W, H) * 0.16);
-          halo.addColorStop(0, 'rgba(255, 168, 96, 0.10)');
-          halo.addColorStop(1, 'rgba(255, 120, 40, 0)');
+          var hr = Math.max(W, H) * (0.15 + surge * 0.08);
+          var halo = ctx.createRadialGradient(gx, gy, 0, gx, gy, hr);
+          halo.addColorStop(0, 'rgba(255, 172, 100, ' + (0.1 + surge * 0.1) + ')');
+          halo.addColorStop(0.45, 'rgba(240, 110, 40, 0.05)');
+          halo.addColorStop(1, 'rgba(200, 70, 20, 0)');
           ctx.fillStyle = halo;
           ctx.fillRect(0, 0, W, H);
         }
@@ -220,26 +476,42 @@
 
       function frame(now) {
         var idle = now - lastInput;
-        var target = idle > 4000 ? 1 : 0;
-        eco += (target - eco) * 0.05;
-        var targetFps = 60 - eco * 40;
-        var step = 1000 / targetFps;
+        var target = idle > 4500 ? 1 : 0;
+        eco += (target - eco) * 0.045;
+        var step = 1000 / (60 - eco * 30);
         if (now - lastDraw < step - 1) {
           requestAnimationFrame(frame);
           return;
         }
         var dt = Math.min(0.1, (now - lastDraw) / 1000);
         lastDraw = now;
-        time += reduceMotion ? 0 : dt;
+        if (!reduceMotion) time += dt;
+        var t = reduceMotion ? 2.2 : time;
         update(dt);
-        draw();
+        draw(t);
         requestAnimationFrame(frame);
+      }
+
+      // 事件坐标统一换算为画布内的 0~1 比例，兼容 DPR、缩放与画布偏移。
+      function toLocal(e) {
+        var rect = canvas.getBoundingClientRect();
+        var sx = W / Math.max(1, rect.width);
+        var sy = H / Math.max(1, rect.height);
+        var lx = e.clientX - rect.left;
+        var ly = e.clientY - rect.top;
+        return {
+          x: clamp(lx / Math.max(1, rect.width), 0, 1),
+          y: clamp(ly / Math.max(1, rect.height), 0, 1),
+          px: lx * sx,
+          py: ly * sy
+        };
       }
 
       window.addEventListener('resize', resize);
       window.addEventListener('pointermove', function (e) {
-        pointer.x = e.clientX / Math.max(1, W);
-        pointer.y = e.clientY / Math.max(1, H);
+        var p = toLocal(e);
+        pointer.x = p.x;
+        pointer.y = p.y;
         pointer.active = true;
         markInput();
       });
@@ -249,21 +521,32 @@
         pointer.y = 0.5;
       });
       window.addEventListener('pointerdown', function (e) {
-        spawnBurst(26, e.clientX / Math.max(1, W), e.clientY / Math.max(1, H));
+        var p = toLocal(e);
+        spawnBurst(30, p.x, p.y, 1);
         markInput();
       });
       window.addEventListener('keydown', function (e) {
         if (e.key === ' ' || e.key === 'Enter') {
-          spawnBurst(40, 0.5, 0.62);
-        } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-          var dir = e.key === 'ArrowLeft' ? -1 : 1;
-          for (var i = 0; i < embers.length; i++)
-            embers[i].vy = Math.max(0.008, embers[i].vy + dir * 0.004);
+          spawnBurst(52, 0.5, 0.68, 1.5);
+        } else if (e.key === 'ArrowLeft') {
+          windPower = Math.max(0.2, windPower - 0.2);
+        } else if (e.key === 'ArrowRight') {
+          windPower = Math.min(2.4, windPower + 0.2);
+        } else if (e.key === 'ArrowUp') {
+          for (var i = 0; i < embers.length; i++) {
+            embers[i].vy = Math.min(0.09, embers[i].vy + 0.006);
+          }
+        } else if (e.key === 'ArrowDown') {
+          for (var j = 0; j < embers.length; j++) {
+            embers[j].vy = Math.max(0.006, embers[j].vy - 0.006);
+          }
         }
         markInput();
       });
 
+      buildSprites();
       resize();
+      // 先同步绘制一帧，避免后台节流或截图时出现空白。
       frame(performance.now());
     })();
   </script>

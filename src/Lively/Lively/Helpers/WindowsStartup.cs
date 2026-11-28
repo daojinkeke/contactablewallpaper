@@ -43,7 +43,11 @@ namespace Lively.Helpers
             {
                 if (isStartWithWindows)
                 {
-                    key.SetValue(curAssembly.GetName().Name, "\"" + Path.ChangeExtension(curAssembly.Location, ".exe") + "\"");
+                    // 单文件发布时 Assembly.Location 为空，改用 ProcessPath 取当前 exe 全路径
+                    var exePath = Environment.ProcessPath;
+                    if (string.IsNullOrEmpty(exePath))
+                        exePath = Path.ChangeExtension(curAssembly.Location, ".exe");
+                    key.SetValue(curAssembly.GetName().Name, "\"" + exePath + "\"");
                 }
                 else
                 {

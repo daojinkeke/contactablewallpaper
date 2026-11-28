@@ -150,29 +150,21 @@ namespace Lively.Player.WebView2.Interaction
             switch (m.Msg)
             {
                 case WM_MOUSEMOVE:
-                    OnMouseMove(ref m);
-                    break;
+                    return OnMouseMove(ref m);
                 case WM_LBUTTONDOWN:
-                    OnButton(ref m, InteractionProtocol.ButtonLeft, InteractionProtocol.ButtonMaskLeft, true);
-                    break;
+                    return OnButton(ref m, InteractionProtocol.ButtonLeft, InteractionProtocol.ButtonMaskLeft, true);
                 case WM_LBUTTONUP:
-                    OnButton(ref m, InteractionProtocol.ButtonLeft, InteractionProtocol.ButtonMaskLeft, false);
-                    break;
+                    return OnButton(ref m, InteractionProtocol.ButtonLeft, InteractionProtocol.ButtonMaskLeft, false);
                 case WM_RBUTTONDOWN:
-                    OnButton(ref m, InteractionProtocol.ButtonRight, InteractionProtocol.ButtonMaskRight, true);
-                    break;
+                    return OnButton(ref m, InteractionProtocol.ButtonRight, InteractionProtocol.ButtonMaskRight, true);
                 case WM_RBUTTONUP:
-                    OnButton(ref m, InteractionProtocol.ButtonRight, InteractionProtocol.ButtonMaskRight, false);
-                    break;
+                    return OnButton(ref m, InteractionProtocol.ButtonRight, InteractionProtocol.ButtonMaskRight, false);
                 case WM_MBUTTONDOWN:
-                    OnButton(ref m, InteractionProtocol.ButtonMiddle, InteractionProtocol.ButtonMaskMiddle, true);
-                    break;
+                    return OnButton(ref m, InteractionProtocol.ButtonMiddle, InteractionProtocol.ButtonMaskMiddle, true);
                 case WM_MBUTTONUP:
-                    OnButton(ref m, InteractionProtocol.ButtonMiddle, InteractionProtocol.ButtonMaskMiddle, false);
-                    break;
+                    return OnButton(ref m, InteractionProtocol.ButtonMiddle, InteractionProtocol.ButtonMaskMiddle, false);
                 case WM_MOUSEWHEEL:
-                    OnWheel(ref m);
-                    break;
+                    return OnWheel(ref m);
                 case WM_KEYDOWN:
                 case WM_SYSKEYDOWN:
                     OnKey(ref m, true);
@@ -183,26 +175,33 @@ namespace Lively.Player.WebView2.Interaction
                     break;
             }
 
-            // 不吞消息：保留 Chromium 既有行为，避免影响焦点与输入法。
+            // 按键不吞：保留 Chromium 既有焦点与输入法行为。
+            // WebView2 的按键本来就由 Core 经 IPC 投递到 PublishKey，不依赖这里。
             return false;
         }
 
-        private void OnMouseMove(ref Message m)
+        /// <summary>
+        /// 返回 true 表示已合成本次输入，调用方应吞掉原生消息。
+        /// 输入窗口在本进程时 Chromium 也会把同一条消息转成原生 DOM 事件，
+        /// 不吞就会出现两套坐标（宿主换算值 + Chromium 自算值）互相拉扯。
+        /// </summary>
+        private bool OnMouseMove(ref Message m)
         {
             var point = GetLocalPoint(m.LParam);
             UpdatePointerInside(point);
 
             if (!TryConvert(point, out var cssX, out var cssY))
-                return;
+                return false;
 
             lastCssX = cssX;
             lastCssY = cssY;
             pendingMove = CreateMessage(InteractionProtocol.KindPointerMove, cssX, cssY,
                 InteractionProtocol.ButtonNone, buttonMask);
             EnsureMoveFlush();
+            return bridge.IsPageInteractive;
         }
 
-        private void OnButton(ref Message m, string button, int mask, bool isDown)
+        private bool OnButton(ref Message m, string button, int mask, bool isDown)
         {
             // 保证按下/抬起的时间顺序晚于已缓存的移动。
             FlushPendingMove();
@@ -213,36 +212,49 @@ namespace Lively.Player.WebView2.Interaction
                 buttonMask &= ~mask;
 
             if (!TryConvert(GetLocalPoint(m.LParam), out var cssX, out var cssY))
-                return;
+                return false;
 
             lastCssX = cssX;
             lastCssY = cssY;
             var kind = isDown ? InteractionProtocol.KindPointerDown : InteractionProtocol.KindPointerUp;
-            bridge.TryPublishInput(CreateMessage(kind, cssX, cssY, button, buttonMask));
+            return bridge.TryPublishInput(CreateMessage(kind, cssX, cssY, button, buttonMask));
         }
 
-        private void OnWheel(ref Message m)
+        private bool OnWheel(ref Message m)
         {
             FlushPendingMove();
 
             // Core 沿用显示器局部物理像素写入 lParam；wParam 高字为滚轮增量。
             var delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
             if (!TryConvert(GetLocalPoint(m.LParam), out var cssX, out var cssY))
-                return;
+                return false;
 
             lastCssX = cssX;
             lastCssY = cssY;
             var message = CreateMessage(InteractionProtocol.KindWheel, cssX, cssY,
                 InteractionProtocol.ButtonNone, buttonMask);
             message.WheelDelta = delta;
-            bridge.TryPublishInput(message);
+            return bridge.TryPublishInput(message);
         }
 
         private void OnKey(ref Message m, bool isDown)
         {
+            PublishKey(m.WParam.ToInt32(), isDown);
+        }
+
+        /// <summary>
+        /// 合成一次页面 DOM 键盘事件，不依赖窗口消息过滤器。
+        /// WebView2 输入窗口属于 Chromium 运行时进程时消息过滤器不可用，
+        /// Core 会通过 IPC 把按键送到这里。
+        /// </summary>
+        public void PublishKey(int virtualKey, bool isDown)
+        {
+            if (disposed || virtualKey <= 0)
+                return;
+
+            // 保证按键顺序晚于已缓存的指针移动。
             FlushPendingMove();
 
-            var virtualKey = m.WParam.ToInt32();
             var message = CreateMessage(isDown ? InteractionProtocol.KindKeyDown : InteractionProtocol.KindKeyUp,
                 lastCssX, lastCssY, InteractionProtocol.ButtonNone, buttonMask);
             InteractionKeyMap.Resolve(virtualKey, out var key, out var code);
@@ -287,7 +299,7 @@ namespace Lively.Player.WebView2.Interaction
             if (bridge.Coordinates.TryToCss(localPhysical, out cssX, out cssY))
                 return true;
 
-            // 实测比例尚未就绪：丢弃本次输入而不是猜测比例，并补一次采样。
+            // 实测比例尚未就绪（或客户区尺寸刚变化）：丢弃本次输入而不是猜测比例，并补一次采样。
             RequestMetricsRefresh();
             return false;
         }
@@ -299,7 +311,7 @@ namespace Lively.Player.WebView2.Interaction
                 return;
 
             lastMetricsRequestUtc = now;
-            _ = bridge.Coordinates.RefreshAsync();
+            bridge.Coordinates.RequestRefresh();
         }
 
         private void UpdatePointerInside(Point localPhysical)

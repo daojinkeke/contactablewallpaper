@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
@@ -25,8 +26,13 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
         private readonly IContactableNavigator navigator = App.Services.GetRequiredService<IContactableNavigator>();
 
         private readonly ObservableCollection<LibraryItemVm> items = new();
+        private readonly List<LibraryItemVm> allItems = new();
         private readonly ObservableCollection<MonitorOption> monitors = new();
+        private readonly ObservableCollection<SourceFilterOption> sourceFilters = new();
         private DispatcherQueueTimer refreshTimer;
+        private string selectedSourceKey = "all";
+        private bool isUpdatingFilter;
+        private bool libraryRootMissing;
         private bool isNavigated;
         private bool isRefreshing;
         private bool isBusy;
@@ -36,6 +42,7 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
             this.InitializeComponent();
             LibraryGrid.ItemsSource = items;
             MonitorCombo.ItemsSource = monitors;
+            SourceFilterCombo.ItemsSource = sourceFilters;
         }
 
         protected override async void OnNavigatedTo(NavigationEventArgs e)
@@ -104,29 +111,20 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
                 if (!isNavigated)
                     return;
 
-                items.Clear();
+                allItems.Clear();
                 foreach (var item in scanned)
                 {
                     item.Thumbnail = LoadBitmap(item.ThumbnailPath);
-                    items.Add(item);
+                    allItems.Add(item);
                 }
 
-                CountText.Text = $"{items.Count} 张";
+                libraryRootMissing = !Directory.Exists(wallpaperService.InstallRoot)
+                    && !Directory.Exists(wallpaperService.TempRoot)
+                    && !Directory.Exists(wallpaperService.WallpaperRoot);
 
-                var installExists = Directory.Exists(wallpaperService.InstallRoot);
-                var tempExists = Directory.Exists(wallpaperService.TempRoot);
-                var rootMissing = !installExists && !tempExists;
-
-                EmptyPanel.Visibility = items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-                LibraryGrid.Visibility = items.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
-                if (items.Count == 0)
-                {
-                    EmptyTitle.Text = rootMissing ? "壁纸库目录不存在" : "壁纸库还是空的";
-                    EmptyDetail.Text = rootMissing
-                        ? $"未找到 {wallpaperService.InstallRoot}。请先启动 Core，或检查设置里的壁纸目录。"
-                        : "去“新建壁纸”生成第一张，或点击刷新重新扫描。";
-                    EmptyCreateButton.Visibility = rootMissing ? Visibility.Collapsed : Visibility.Visible;
-                }
+                UpdateStorageInfo();
+                RebuildSourceFilters();
+                ApplyFilter();
             }
             catch (Exception ex)
             {
@@ -173,20 +171,133 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
             navigator.NavigateTo(ContactablePageType.createWallpaper);
         }
 
+        private void UpdateStorageInfo()
+        {
+            LibraryPathText.Text = wallpaperService.WallpaperRoot;
+            LibrarySourceSummary.Text =
+                $"AI 生成 {CountOf(WallpaperSourceKind.Ai)} 张 · " +
+                $"我导入的 {CountOf(WallpaperSourceKind.Imported)} 张 · " +
+                $"内置 {CountOf(WallpaperSourceKind.Builtin)} 张";
+        }
+
+        private int CountOf(WallpaperSourceKind kind) => allItems.Count(x => x.SourceKind == kind);
+
+        private void RebuildSourceFilters()
+        {
+            isUpdatingFilter = true;
+            try
+            {
+                sourceFilters.Clear();
+                sourceFilters.Add(new SourceFilterOption { Key = "all", Label = $"全部来源（{allItems.Count}）" });
+                sourceFilters.Add(new SourceFilterOption { Key = "ai", Label = $"AI 生成（{CountOf(WallpaperSourceKind.Ai)}）" });
+                sourceFilters.Add(new SourceFilterOption { Key = "imported", Label = $"我导入的（{CountOf(WallpaperSourceKind.Imported)}）" });
+                sourceFilters.Add(new SourceFilterOption { Key = "builtin", Label = $"内置壁纸（{CountOf(WallpaperSourceKind.Builtin)}）" });
+                SourceFilterCombo.SelectedItem =
+                    sourceFilters.FirstOrDefault(x => x.Key == selectedSourceKey) ?? sourceFilters[0];
+            }
+            finally
+            {
+                isUpdatingFilter = false;
+            }
+        }
+
+        private void ApplyFilter()
+        {
+            IEnumerable<LibraryItemVm> filtered = selectedSourceKey switch
+            {
+                "ai" => allItems.Where(x => x.SourceKind == WallpaperSourceKind.Ai),
+                "imported" => allItems.Where(x => x.SourceKind == WallpaperSourceKind.Imported),
+                "builtin" => allItems.Where(x => x.SourceKind == WallpaperSourceKind.Builtin),
+                _ => allItems,
+            };
+
+            items.Clear();
+            foreach (var item in filtered)
+                items.Add(item);
+
+            CountText.Text = items.Count == allItems.Count
+                ? $"{items.Count} 张"
+                : $"{items.Count} / {allItems.Count} 张";
+
+            EmptyPanel.Visibility = items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            LibraryGrid.Visibility = items.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+            if (items.Count > 0)
+                return;
+
+            if (allItems.Count == 0)
+            {
+                EmptyTitle.Text = libraryRootMissing ? "壁纸库目录不存在" : "壁纸库还是空的";
+                EmptyDetail.Text = libraryRootMissing
+                    ? $"未找到 {wallpaperService.WallpaperRoot}。请先启动 Core，或检查设置里的壁纸目录。"
+                    : $"壁纸会保存在 {wallpaperService.WallpaperRoot}。去“新建壁纸”生成第一张，或点击刷新重新扫描。";
+                EmptyCreateButton.Visibility = libraryRootMissing ? Visibility.Collapsed : Visibility.Visible;
+            }
+            else
+            {
+                EmptyTitle.Text = "这个来源下还没有壁纸";
+                EmptyDetail.Text = "切换到“全部来源”查看整个壁纸库。";
+                EmptyCreateButton.Visibility = Visibility.Collapsed;
+            }
+        }
+
+        private void SourceFilterCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (isUpdatingFilter)
+                return;
+            if (SourceFilterCombo.SelectedItem is SourceFilterOption option)
+            {
+                selectedSourceKey = option.Key;
+                ApplyFilter();
+            }
+        }
+
         private void OpenFolderButton_Click(object sender, RoutedEventArgs e)
         {
-            var target = Directory.Exists(wallpaperService.InstallRoot)
-                ? wallpaperService.InstallRoot
-                : wallpaperService.WallpaperRoot;
-            if (!Directory.Exists(target))
+            OpenFolder(wallpaperService.WallpaperRoot, "壁纸库");
+        }
+
+        private void OpenDraftsButton_Click(object sender, RoutedEventArgs e)
+        {
+            OpenFolder(wallpaperService.ProjectsRoot, "生成草稿");
+        }
+
+        private void LocateItem_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not FrameworkElement element || element.Tag is not LibraryItemVm item)
+                return;
+
+            if (string.IsNullOrWhiteSpace(item.FolderPath) || !Directory.Exists(item.FolderPath))
             {
-                ShowStatus(InfoBarSeverity.Warning, $"库目录不存在：{target}");
+                ShowStatus(InfoBarSeverity.Warning, $"壁纸目录不存在：{item.FolderPath}");
                 return;
             }
 
             try
             {
-                Process.Start(new ProcessStartInfo { FileName = target, UseShellExecute = true });
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "explorer.exe",
+                    Arguments = $"/select,\"{item.FolderPath}\"",
+                    UseShellExecute = true,
+                });
+            }
+            catch (Exception ex)
+            {
+                ShowStatus(InfoBarSeverity.Error, $"打开目录失败：{ex.Message}");
+            }
+        }
+
+        private void OpenFolder(string path, string label)
+        {
+            if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
+            {
+                ShowStatus(InfoBarSeverity.Warning, $"{label}目录不存在：{path}");
+                return;
+            }
+
+            try
+            {
+                Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
             }
             catch (Exception ex)
             {

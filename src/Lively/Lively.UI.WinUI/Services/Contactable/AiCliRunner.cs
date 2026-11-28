@@ -20,6 +20,10 @@ namespace Lively.UI.WinUI.Services.Contactable
         public string OutputPath { get; set; }
         /// <summary>节能模式：为 true 时给 CLI 追加 --eco，要求生成结果自带低功耗行为。</summary>
         public bool Eco { get; set; }
+        /// <summary>参考图片路径；非空时 CLI 会先调用视觉模型转述，再进入生成。</summary>
+        public string ImagePath { get; set; }
+        /// <summary>允许壁纸访问外部网络：为 true 时给 CLI 追加 --allow-network。</summary>
+        public bool AllowExternalNetwork { get; set; }
     }
 
     public sealed class AiGenerationProgress
@@ -49,6 +53,10 @@ namespace Lively.UI.WinUI.Services.Contactable
         public int Height { get; set; } = 1080;
         /// <summary>节能模式：为 true 时给 CLI 追加 --eco。</summary>
         public bool Eco { get; set; }
+        /// <summary>参考图片路径；非空时 CLI 会先调用视觉模型转述，再进入续改。</summary>
+        public string ImagePath { get; set; }
+        /// <summary>允许壁纸访问外部网络：为 true 时给 CLI 追加 --allow-network。</summary>
+        public bool AllowExternalNetwork { get; set; }
     }
 
     public sealed class AiRevisionResult
@@ -206,8 +214,15 @@ namespace Lively.UI.WinUI.Services.Contactable
                 startInfo.ArgumentList.Add("--color");
                 startInfo.ArgumentList.Add(options.Color);
             }
+            if (!string.IsNullOrWhiteSpace(options.ImagePath))
+            {
+                startInfo.ArgumentList.Add("--image");
+                startInfo.ArgumentList.Add(options.ImagePath);
+            }
             if (options.Eco)
                 startInfo.ArgumentList.Add("--eco");
+            if (options.AllowExternalNetwork)
+                startInfo.ArgumentList.Add("--allow-network");
 
             using var process = new Process { StartInfo = startInfo };
             var stdout = new StringBuilder();
@@ -237,6 +252,13 @@ namespace Lively.UI.WinUI.Services.Contactable
                 return Fail("ai_failed", $"生成器启动失败：{ex.Message}");
             }
 
+            var stallTriggered = 0;
+            using var stallTimer = new Timer(_ =>
+            {
+                if (Interlocked.Exchange(ref stallTriggered, 1) == 0)
+                    TryKill(process);
+            }, null, StallTimeout, Timeout.InfiniteTimeSpan);
+
             var stdoutTask = Task.Run(async () =>
             {
                 string line;
@@ -249,6 +271,7 @@ namespace Lively.UI.WinUI.Services.Contactable
                             stdout.Remove(0, stdout.Length - 60000);
                     }
                     lastOutput = DateTime.UtcNow;
+                    stallTimer.Change(StallTimeout, Timeout.InfiniteTimeSpan);
                     MapLine(line, Report);
                 }
             });
@@ -265,6 +288,7 @@ namespace Lively.UI.WinUI.Services.Contactable
                             stderr.Remove(0, stderr.Length - 32768);
                     }
                     lastOutput = DateTime.UtcNow;
+                    stallTimer.Change(StallTimeout, Timeout.InfiniteTimeSpan);
                 }
             });
 
@@ -278,7 +302,7 @@ namespace Lively.UI.WinUI.Services.Contactable
             if (finished != exitTask)
             {
                 var canceledByUser = cancellationToken.IsCancellationRequested;
-                var stalled = !canceledByUser && DateTime.UtcNow - lastOutput > StallTimeout;
+                var stalled = !canceledByUser && Volatile.Read(ref stallTriggered) == 1;
                 TryKill(process);
                 await SafeAwait(exitTask).ConfigureAwait(false);
                 await Task.WhenAll(SafeAwait(stdoutTask), SafeAwait(stderrTask)).ConfigureAwait(false);
@@ -313,8 +337,11 @@ namespace Lively.UI.WinUI.Services.Contactable
             if (exitCode == 0)
                 return Fail("ai_output_missing", "生成器报告成功，但没有找到输出文件。", detail);
 
+            if (Volatile.Read(ref stallTriggered) == 1)
+                return Fail("ai_stalled", "生成器长时间没有任何输出，已终止。", detail);
+
             if (errorText.Contains("尚未配置 AI", StringComparison.OrdinalIgnoreCase))
-                return Fail(AiErrorCodes.NotConfigured, "尚未配置 AI 服务，请先在设置页填写 BaseUrl / Model / API Key。", detail);
+                return Fail(AiErrorCodes.NotConfigured, "尚未配置 AI 服务，请先在设置页粘贴 API Key 自动识别服务商与模型。", detail);
 
             var match = Regex.Match(errorText, @"生成失败（(?<code>[^）]+)）");
             var errorCode = match.Success ? match.Groups["code"].Value : null;
@@ -365,8 +392,15 @@ namespace Lively.UI.WinUI.Services.Contactable
             startInfo.ArgumentList.Add(options.Width.ToString());
             startInfo.ArgumentList.Add("--height");
             startInfo.ArgumentList.Add(options.Height.ToString());
+            if (!string.IsNullOrWhiteSpace(options.ImagePath))
+            {
+                startInfo.ArgumentList.Add("--image");
+                startInfo.ArgumentList.Add(options.ImagePath);
+            }
             if (options.Eco)
                 startInfo.ArgumentList.Add("--eco");
+            if (options.AllowExternalNetwork)
+                startInfo.ArgumentList.Add("--allow-network");
 
             using var process = new Process { StartInfo = startInfo };
             var stdout = new StringBuilder();
@@ -401,6 +435,13 @@ namespace Lively.UI.WinUI.Services.Contactable
                 return ReviseFail("ai_failed", $"修改器启动失败：{ex.Message}");
             }
 
+            var stallTriggered = 0;
+            using var stallTimer = new Timer(_ =>
+            {
+                if (Interlocked.Exchange(ref stallTriggered, 1) == 0)
+                    TryKill(process);
+            }, null, StallTimeout, Timeout.InfiniteTimeSpan);
+
             var stdoutTask = Task.Run(async () =>
             {
                 string line;
@@ -413,6 +454,7 @@ namespace Lively.UI.WinUI.Services.Contactable
                             stdout.Remove(0, stdout.Length - 60000);
                     }
                     lastOutput = DateTime.UtcNow;
+                    stallTimer.Change(StallTimeout, Timeout.InfiniteTimeSpan);
                     MapReviseLine(line, Report);
                 }
             });
@@ -429,6 +471,7 @@ namespace Lively.UI.WinUI.Services.Contactable
                             stderr.Remove(0, stderr.Length - 32768);
                     }
                     lastOutput = DateTime.UtcNow;
+                    stallTimer.Change(StallTimeout, Timeout.InfiniteTimeSpan);
                 }
             });
 
@@ -442,7 +485,7 @@ namespace Lively.UI.WinUI.Services.Contactable
             if (finished != exitTask)
             {
                 var canceledByUser = cancellationToken.IsCancellationRequested;
-                var stalled = !canceledByUser && DateTime.UtcNow - lastOutput > StallTimeout;
+                var stalled = !canceledByUser && Volatile.Read(ref stallTriggered) == 1;
                 TryKill(process);
                 await SafeAwait(exitTask).ConfigureAwait(false);
                 await Task.WhenAll(SafeAwait(stdoutTask), SafeAwait(stderrTask)).ConfigureAwait(false);
@@ -461,6 +504,9 @@ namespace Lively.UI.WinUI.Services.Contactable
             var errorText = stderr.ToString();
             var detail = string.IsNullOrWhiteSpace(errorText) ? stdout.ToString() : errorText;
 
+            if (Volatile.Read(ref stallTriggered) == 1)
+                return ReviseFail("ai_stalled", "修改器长时间没有任何输出，已终止。", detail);
+
             if (exitCode == 0)
             {
                 var match = Regex.Match(stdout.ToString(), @"会话标识：\s*(?<id>wp-[A-Za-z0-9\-]+)（v(?<ver>\d+)）");
@@ -475,7 +521,7 @@ namespace Lively.UI.WinUI.Services.Contactable
             }
 
             if (errorText.Contains("尚未配置 AI", StringComparison.OrdinalIgnoreCase))
-                return ReviseFail(AiErrorCodes.NotConfigured, "尚未配置 AI 服务，请先在生成按钮下方填写 BaseUrl / Model / API Key。", detail);
+                return ReviseFail(AiErrorCodes.NotConfigured, "尚未配置 AI 服务，请先在生成按钮下方粘贴 API Key 自动识别服务商与模型。", detail);
             if (errorText.Contains("找不到会话", StringComparison.OrdinalIgnoreCase))
                 return ReviseFail("ai_session_missing", "会话文件已丢失，无法继续修改。", detail);
 
@@ -687,7 +733,7 @@ namespace Lively.UI.WinUI.Services.Contactable
             switch (code)
             {
                 case AiErrorCodes.NotConfigured:
-                    return "尚未配置 AI 服务，请先在设置页填写 BaseUrl / Model / API Key。";
+                    return "尚未配置 AI 服务，请先在设置页粘贴 API Key 自动识别服务商与模型。";
                 case AiErrorCodes.AuthenticationFailed:
                     return "鉴权失败：API Key 无效或没有访问权限。";
                 case AiErrorCodes.QuotaExceeded:
@@ -711,6 +757,59 @@ namespace Lively.UI.WinUI.Services.Contactable
 
         private static void MapLine(string line, Action<int, string> report)
         {
+            var text = (line ?? string.Empty).Trim();
+            if (text.StartsWith("视觉模型：", StringComparison.Ordinal))
+                return;
+            if (text.StartsWith("正在读取参考图片", StringComparison.Ordinal))
+            {
+                report(4, "正在读取参考图片…");
+                return;
+            }
+            if (text.StartsWith("正在理解参考图", StringComparison.Ordinal))
+            {
+                report(4, text);
+                return;
+            }
+            if (text.StartsWith("参考图片已转述", StringComparison.Ordinal))
+            {
+                report(6, "参考图已理解，准备生成…");
+                return;
+            }
+            if (text.StartsWith("参考图：", StringComparison.Ordinal))
+                return;
+            if (text.StartsWith("已提交", StringComparison.Ordinal))
+            {
+                report(8, "已提交，等待模型响应…");
+                return;
+            }
+            if (text.StartsWith("正在生成", StringComparison.Ordinal))
+            {
+                report(15, "模型正在生成…");
+                return;
+            }
+            if (text.StartsWith("等待模型", StringComparison.Ordinal))
+            {
+                report(14, text);
+                return;
+            }
+            if (text.StartsWith("校验未通过", StringComparison.Ordinal) ||
+                text.StartsWith("正在自动修复", StringComparison.Ordinal))
+            {
+                report(74, "校验未通过，正在自动修复…");
+                return;
+            }
+            if (text.StartsWith("正在校验", StringComparison.Ordinal))
+            {
+                report(78, "正在校验生成结果…");
+                return;
+            }
+            if (text.StartsWith("已写入", StringComparison.Ordinal) ||
+                text.StartsWith("文件大小", StringComparison.Ordinal))
+            {
+                report(99, "正在写入结果…");
+                return;
+            }
+
             if (line.Contains("[1/3] 已提交"))
             {
                 report(8, "已提交，等待模型响应…");
@@ -760,6 +859,38 @@ namespace Lively.UI.WinUI.Services.Contactable
             }
             if (text.StartsWith("节能模式：", StringComparison.Ordinal))
                 return;
+            if (text.StartsWith("视觉模型：", StringComparison.Ordinal))
+                return;
+            if (text.StartsWith("正在读取参考图片", StringComparison.Ordinal))
+            {
+                report(7, "正在读取参考图片…");
+                return;
+            }
+            if (text.StartsWith("正在理解参考图", StringComparison.Ordinal))
+            {
+                report(7, text);
+                return;
+            }
+            if (text.StartsWith("参考图片已转述", StringComparison.Ordinal))
+            {
+                report(9, "参考图已理解，准备修改…");
+                return;
+            }
+            if (text.StartsWith("已提交", StringComparison.Ordinal))
+            {
+                report(10, "已提交，等待模型响应…");
+                return;
+            }
+            if (text.StartsWith("正在生成", StringComparison.Ordinal))
+            {
+                report(16, "模型正在生成…");
+                return;
+            }
+            if (text.StartsWith("等待模型", StringComparison.Ordinal))
+            {
+                report(15, text);
+                return;
+            }
             if (text == "完成")
             {
                 report(100, "修改完成");

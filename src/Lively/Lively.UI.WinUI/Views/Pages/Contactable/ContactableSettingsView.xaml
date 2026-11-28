@@ -184,6 +184,28 @@
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <StackPanel Spacing="2">
+                                <TextBlock x:Name="KeyboardLabel" Text="转发键盘" />
+                                <TextBlock
+                                    FontSize="12"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="把键盘事件转发给壁纸（Win 组合键、Alt+Tab/F4、输入法组字除外）。默认开启。" />
+                            </StackPanel>
+                            <ToggleSwitch
+                                x:Name="KeyboardToggle"
+                                Grid.Column="1"
+                                MinWidth="0"
+                                IsOn="True" />
+                        </Grid>
+                        <Rectangle
+                            Height="1"
+                            Fill="{ThemeResource ContactableHairlineBrush}"
+                            Opacity="0.6" />
+                        <Grid ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="2">
                                 <TextBlock x:Name="MiddleLabel" Text="转发中键" />
                                 <TextBlock
                                     FontSize="12"
@@ -192,6 +214,28 @@
                             </StackPanel>
                             <ToggleSwitch
                                 x:Name="MiddleToggle"
+                                Grid.Column="1"
+                                MinWidth="0" />
+                        </Grid>
+                        <Rectangle
+                            Height="1"
+                            Fill="{ThemeResource ContactableHairlineBrush}"
+                            Opacity="0.6" />
+                        <Grid ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="2">
+                                <TextBlock Text="允许壁纸访问外部网络" />
+                                <TextBlock
+                                    FontSize="12"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="关闭时按离线约束校验并拦截页面网络请求；开启后允许生成结果访问外部网络。默认关闭。"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                            <ToggleSwitch
+                                x:Name="NetworkToggle"
                                 Grid.Column="1"
                                 MinWidth="0" />
                         </Grid>
@@ -253,6 +297,74 @@
 
                 <Border
                     Padding="18"
+                    BorderBrush="{ThemeResource ContactableHairlineBrush}"
+                    BorderThickness="1"
+                    CornerRadius="16">
+                    <Border.Background>
+                        <LinearGradientBrush StartPoint="0,0" EndPoint="0.4,1">
+                            <GradientStop Offset="0" Color="#1FA0C4FF" />
+                            <GradientStop Offset="1" Color="#0890B4FF" />
+                        </LinearGradientBrush>
+                    </Border.Background>
+                    <StackPanel Spacing="12">
+                        <Grid ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border
+                                Width="4"
+                                Height="20"
+                                VerticalAlignment="Center"
+                                Background="{ThemeResource ContactableAccentBrush}"
+                                CornerRadius="2" />
+                            <StackPanel Grid.Column="1" Spacing="1">
+                                <TextBlock FontSize="16" FontWeight="SemiBold" Text="存储位置" />
+                                <TextBlock
+                                    CharacterSpacing="100"
+                                    FontSize="10"
+                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                    Text="03 · STORAGE" />
+                            </StackPanel>
+                        </Grid>
+                        <StackPanel Spacing="2">
+                            <TextBlock Text="壁纸库目录" />
+                            <TextBlock
+                                x:Name="WallpaperPathText"
+                                FontSize="12"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                IsTextSelectionEnabled="True"
+                                TextWrapping="Wrap" />
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Click="OpenLibraryFolder_Click" Content="打开壁纸库" />
+                            <Button Click="OpenDraftsFolder_Click" Content="打开生成草稿" />
+                        </StackPanel>
+                        <Border
+                            Padding="10,8"
+                            Background="#1490B4FF"
+                            BorderBrush="{ThemeResource ContactableHairlineBrush}"
+                            BorderThickness="1"
+                            CornerRadius="10">
+                            <StackPanel Spacing="4">
+                                <TextBlock
+                                    FontSize="11"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="AI 生成和照片视差生成的壁纸，保存后都在上面的壁纸库目录里。安装目录只放程序文件，不会存放壁纸。"
+                                    TextWrapping="Wrap" />
+                                <TextBlock
+                                    x:Name="InstallPathText"
+                                    FontSize="11"
+                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                    IsTextSelectionEnabled="True"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </Border>
+
+                <Border
+                    Padding="18"
                     Background="#1A6EA8FE"
                     BorderBrush="{ThemeResource ContactableAccentBrush}"
                     BorderThickness="1"
@@ -275,27 +387,74 @@
                                     CharacterSpacing="100"
                                     FontSize="10"
                                     Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                    Text="03 · PROVIDER" />
+                                    Text="04 · PROVIDER" />
                             </StackPanel>
                         </Grid>
                         <TextBlock
                             FontSize="12"
                             Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                            Text="用于“新建壁纸”的模型服务。API Key 以 DPAPI 加密保存在本机；环境变量 LIVELY_AI_* 优先。"
+                            Text="用于“新建壁纸”的模型服务。只需粘贴 API Key，保存时自动识别服务商与模型；识别失败可展开手动配置。API Key 以 DPAPI 加密保存在本机。"
                             TextWrapping="Wrap" />
-                        <TextBox
-                            x:Name="BaseUrlBox"
-                            Header="BaseUrl"
-                            PlaceholderText="https://api.openai.com/v1" />
-                        <TextBox
-                            x:Name="ModelBox"
-                            Header="Model"
-                            PlaceholderText="gpt-4o-mini" />
                         <PasswordBox
                             x:Name="ApiKeyBox"
                             Header="API Key"
                             PasswordRevealMode="Peek"
-                            PlaceholderText="留空表示不修改已保存的密钥" />
+                            PlaceholderText="粘贴 API Key，保存时自动识别服务商与模型" />
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock
+                                x:Name="DetectStatusText"
+                                VerticalAlignment="Center"
+                                FontSize="12"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="粘贴 API Key 后自动识别服务商与模型"
+                                TextWrapping="Wrap" />
+                            <Button
+                                x:Name="DetectButton"
+                                Grid.Column="1"
+                                Click="DetectButton_Click"
+                                Content="自动识别" />
+                            <ProgressRing
+                                x:Name="DetectRing"
+                                Grid.Column="2"
+                                Width="18"
+                                Height="18"
+                                IsActive="False"
+                                Visibility="Collapsed" />
+                        </Grid>
+                        <ComboBox
+                            x:Name="ModelCombo"
+                            Header="模型"
+                            HorizontalAlignment="Stretch"
+                            IsEnabled="False"
+                            PlaceholderText="识别成功后自动填入"
+                            SelectionChanged="ModelCombo_SelectionChanged" />
+                        <Expander
+                            x:Name="ManualExpander"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Stretch"
+                            Header="手动配置（自动识别失败时使用）"
+                            IsExpanded="False">
+                            <StackPanel Padding="0,4,0,0" Spacing="8">
+                                <TextBox
+                                    x:Name="BaseUrlBox"
+                                    Header="BaseUrl"
+                                    PlaceholderText="例如 https://api.deepseek.com/v1" />
+                                <TextBox
+                                    x:Name="ModelBox"
+                                    Header="Model"
+                                    PlaceholderText="例如 deepseek-chat" />
+                                <TextBlock
+                                    FontSize="11"
+                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                    Text="自动识别成功时无需填写这里；展开后会以手填内容为准。"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Expander>
                         <StackPanel Orientation="Horizontal" Spacing="10">
                             <TextBlock
                                 VerticalAlignment="Center"
@@ -320,7 +479,7 @@
                             <TextBlock
                                 FontSize="11"
                                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                Text="与“新建壁纸”页共用同一份 AiSettings.json，任一页修改后另一页重新进入即可看到最新状态。"
+                                Text="自动识别只向常见服务商查询一次模型列表，不消耗生成额度；与“新建壁纸”页共用同一份 AiSettings.json。"
                                 TextWrapping="Wrap" />
                         </Border>
                     </StackPanel>

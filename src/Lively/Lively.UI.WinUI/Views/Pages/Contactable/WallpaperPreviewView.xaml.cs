@@ -39,6 +39,8 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
         private readonly ObservableCollection<LibraryItemVm> libraryItems = new();
         private DispatcherQueueTimer refreshTimer;
         private string pendingFolder;
+        private LibraryItemVm previewCandidate;
+        private bool suppressPickerPreview;
         private bool isNavigated;
         private bool isRefreshing;
         private bool isApplying;
@@ -169,21 +171,47 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
                     foreach (var item in snapshot.Library)
                         libraryItems.Add(item);
 
-                    if (!string.IsNullOrWhiteSpace(pendingFolder))
+                    LibraryItemVm requested = null;
+                    suppressPickerPreview = true;
+                    try
                     {
-                        var selected = libraryItems.FirstOrDefault(x =>
-                            string.Equals(x.FolderPath, pendingFolder, StringComparison.OrdinalIgnoreCase));
-                        if (selected != null)
-                            WallpaperPicker.SelectedItem = selected;
-                        pendingFolder = null;
+                        if (!string.IsNullOrWhiteSpace(pendingFolder))
+                        {
+                            requested = libraryItems.FirstOrDefault(x =>
+                                string.Equals(x.FolderPath, pendingFolder, StringComparison.OrdinalIgnoreCase));
+                            if (requested != null)
+                                WallpaperPicker.SelectedItem = requested;
+                            pendingFolder = null;
+                        }
+                        else if (WallpaperPicker.SelectedItem == null)
+                        {
+                            WallpaperPicker.SelectedIndex = libraryItems.Count > 0 ? 0 : -1;
+                        }
                     }
-                    else if (WallpaperPicker.SelectedItem == null)
+                    finally
                     {
-                        WallpaperPicker.SelectedIndex = libraryItems.Count > 0 ? 0 : -1;
+                        suppressPickerPreview = false;
+                    }
+
+                    // 从壁纸库点“预览”进来时，直接把这一张显示在预览区，
+                    // 而不是等它被应用后才出现（未应用时原来只显示空状态）。
+                    if (requested != null)
+                    {
+                        await ApplyWallpaperStateAsync(snapshot.Wallpapers);
+                        await ShowLibraryPreviewAsync(requested);
+                        return;
                     }
                 }
 
-                await ApplyWallpaperStateAsync(snapshot.Wallpapers);
+                var hasApplied = await ApplyWallpaperStateAsync(snapshot.Wallpapers);
+
+                // 没有已应用的壁纸时，直接显示壁纸库里当前选中的一张（默认第一张），
+                // 避免预览区只剩一句“还没有壁纸”而看不到任何画面。
+                if (!hasApplied && libraryItems.Count > 0)
+                {
+                    var fallback = WallpaperPicker.SelectedItem as LibraryItemVm ?? libraryItems[0];
+                    await ShowLibraryPreviewAsync(fallback);
+                }
             }
             catch (Exception ex)
             {
@@ -218,11 +246,14 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
                 MonitorCombo.SelectedItem = selected;
         }
 
-        private async Task ApplyWallpaperStateAsync(List<WallpaperData> wallpapers)
+        private async Task<bool> ApplyWallpaperStateAsync(List<WallpaperData> wallpapers)
         {
             var monitor = (MonitorCombo.SelectedItem as MonitorOption)?.Monitor ?? displayManager.PrimaryMonitor;
             if (monitor == null)
             {
+                previewCandidate = null;
+                PreviewSectionTitle.Text = "当前壁纸";
+                PreviewModeHint.Visibility = Visibility.Collapsed;
                 CurrentTitle.Text = "没有可用显示器";
                 CurrentType.Text = string.Empty;
                 CurrentPath.Text = string.Empty;
@@ -230,7 +261,7 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
                 NoWallpaperPanel.Visibility = Visibility.Visible;
                 SetNoWallpaperMessage("没有检测到显示器", "请确认显示设备已连接，然后点“刷新”。");
                 CloseWebPreview();
-                return;
+                return false;
             }
 
             MonitorInfoText.Text = $"{monitor.DisplayName} · {monitor.Bounds.Width}×{monitor.Bounds.Height} · DeviceId {monitor.DeviceId}";
@@ -240,6 +271,9 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
 
             if (wallpaper == null)
             {
+                previewCandidate = null;
+                PreviewSectionTitle.Text = "当前壁纸";
+                PreviewModeHint.Visibility = Visibility.Collapsed;
                 CurrentTitle.Text = "未应用壁纸";
                 CurrentType.Text = string.Empty;
                 CurrentPath.Text = string.Empty;
@@ -247,12 +281,15 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
                 NoWallpaperPanel.Visibility = Visibility.Visible;
                 SetNoWallpaperMessage("这个显示器还没有壁纸", "在下方从壁纸库选一张并点击“更换”。");
                 CloseWebPreview();
-                return;
+                return false;
             }
 
             var libraryItem = libraryItems.FirstOrDefault(x =>
                 string.Equals(x.FolderPath, wallpaper.LivelyInfoFolderPath, StringComparison.OrdinalIgnoreCase));
 
+            previewCandidate = null;
+            PreviewSectionTitle.Text = "当前壁纸";
+            PreviewModeHint.Visibility = Visibility.Collapsed;
             CurrentTitle.Text = libraryItem?.Title ?? Path.GetFileName(wallpaper.LivelyInfoFolderPath);
             CurrentType.Text = libraryItem?.TypeText ?? ContactableWallpaperService.DescribeType(wallpaper.Category);
             CurrentPath.Text = wallpaper.LivelyInfoFolderPath;
@@ -262,6 +299,36 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
             PreviewPlaceholder.Visibility = Visibility.Collapsed;
 
             await TryShowWebPreviewAsync(wallpaper);
+            return true;
+        }
+
+        /// <summary>
+        /// 把壁纸库里选中（但尚未应用）的一张显示到预览区：
+        /// 有网页内容就内嵌渲染，否则退回缩略图，避免只剩空状态。
+        /// </summary>
+        private async Task ShowLibraryPreviewAsync(LibraryItemVm item)
+        {
+            if (item == null || !isNavigated)
+                return;
+
+            previewCandidate = item;
+            PreviewSectionTitle.Text = "预览画面（未应用）";
+            CurrentTitle.Text = item.Title;
+            CurrentType.Text = item.TypeText;
+            CurrentPath.Text = item.FolderPath;
+            PreviewModeHint.Visibility = Visibility.Visible;
+
+            CloseWebPreview();
+            NoWallpaperPanel.Visibility = Visibility.Collapsed;
+            PreviewPlaceholder.Visibility = Visibility.Collapsed;
+
+            var thumbnail = string.IsNullOrWhiteSpace(item.ThumbnailPath)
+                ? Path.Combine(item.FolderPath ?? string.Empty, "thumbnail.jpg")
+                : item.ThumbnailPath;
+            CurrentImage.Source = LoadBitmap(thumbnail);
+            CurrentImage.Visibility = CurrentImage.Source != null ? Visibility.Visible : Visibility.Collapsed;
+
+            await TryShowWebPreviewFolderAsync(item.FolderPath);
         }
 
         private void SetNoWallpaperMessage(string title, string description)
@@ -277,7 +344,11 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
             if (wallpaper.Category is not (WallpaperType.web or WallpaperType.webaudio))
                 return;
 
-            var folder = wallpaper.LivelyInfoFolderPath;
+            await TryShowWebPreviewFolderAsync(wallpaper.LivelyInfoFolderPath);
+        }
+
+        private async Task TryShowWebPreviewFolderAsync(string folder)
+        {
             var html = string.IsNullOrWhiteSpace(folder) ? null : Path.Combine(folder, "index.html");
             if (html == null || !File.Exists(html))
                 return;
@@ -352,6 +423,19 @@ namespace Lively.UI.WinUI.Views.Pages.Contactable
                 return;
 
             _ = RefreshCurrentAsync();
+        }
+
+        private async void WallpaperPicker_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (suppressPickerPreview || !isNavigated || isRefreshing)
+                return;
+
+            // 只响应用户的显式选择；页面加载时的程序化默认选中不切换预览。
+            if (WallpaperPicker.FocusState == FocusState.Unfocused && !WallpaperPicker.IsDropDownOpen)
+                return;
+
+            if (WallpaperPicker.SelectedItem is LibraryItemVm item)
+                await ShowLibraryPreviewAsync(item);
         }
 
         private async Task RefreshCurrentAsync()

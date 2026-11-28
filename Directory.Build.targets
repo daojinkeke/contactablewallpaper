@@ -1,0 +1,35 @@
+<Project>
+
+  <!--
+    单文件发布裁剪：设计器与调试诊断类程序集在运行时永远不会被加载，
+    但 .NET 运行时包会把它们一起打进单文件 bundle。这里在打包前从发布清单里剔除。
+
+    仅当发布端显式传 -p:TrimSingleFileBundle=true 时生效（publish.ps1 的 Core / AI CLI 会传），
+    其余构建（含 UI、Player）行为完全不变。
+  -->
+  <Target Name="TrimUnusedAssembliesFromSingleFile"
+          BeforeTargets="_ComputeFilesToBundle"
+          Condition="'$(TrimSingleFileBundle)' == 'true'">
+
+    <ItemGroup>
+      <_TrimmedPublishAsset Include="@(ResolvedFileToPublish)"
+                            Condition="'%(Filename)' == 'System.Windows.Forms.Design'
+                                    or '%(Filename)' == 'System.Windows.Forms.Design.Editors'
+                                    or '%(Filename)' == 'System.Windows.Forms.Design.resources'
+                                    or '%(Filename)' == 'System.Drawing.Design'
+                                    or '%(Filename)' == 'System.Design'
+                                    or '%(Filename)' == 'Microsoft.DiaSymReader.Native.amd64'
+                                    or '%(Filename)' == 'mscordaccore'
+                                    or '%(Filename)' == 'mscordbi'
+                                    or '%(Filename)' == 'createdump'" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(_TrimmedPublishAsset)" />
+    </ItemGroup>
+
+    <Message Importance="high"
+             Text="单文件裁剪：已剔除 @(_TrimmedPublishAsset->Count()) 个设计器/诊断程序集" />
+  </Target>
+
+</Project>

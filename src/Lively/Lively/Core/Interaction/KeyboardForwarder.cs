@@ -1,6 +1,5 @@
 using Lively.Common.Helpers.Pinvoke;
 using Lively.Common.Services;
-using Lively.Models.Enums;
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -61,9 +60,10 @@ namespace Lively.Core.Interaction
                 if (virtualKey <= 0)
                     return false;
 
-                // Only forwarded in mousekeyboard mode while the desktop is in the foreground.
+                // Only forwarded when the desktop is in the foreground and the keyboard
+                // forwarding switch is on; independent of the mouse forwarding mode.
                 if (!isDesktopForeground ||
-                    userSettings.Settings.InputForward != InputForwardMode.mousekeyboard)
+                    !userSettings.Settings.InteractionForwardKeyboard)
                     return false;
 
                 // Never forward the Windows key or any combo while it is held.

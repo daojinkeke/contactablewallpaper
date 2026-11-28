@@ -30,7 +30,7 @@ namespace Lively.Services
             Load<List<WallpaperLayoutModel>>();
 
             // 交互默认值迁移（按版本号逐级回补，每个版本只执行一次）：
-            // 1 = 总开关改为开启；2 = 滚轮转发改为开启。
+            // 1 = 总开关改为开启；2 = 滚轮转发改为开启；3 = 键盘转发改为开启。
             // 历史版本默认关闭且旧 UI 无法持久化，老 Settings.json 里会残留 false。
             // 只处理落后版本，用户迁移之后手动关闭的开关不会被再次覆盖。
             var interactionDefaultsMigrated = false;
@@ -44,6 +44,12 @@ namespace Lively.Services
             {
                 Settings.InteractionForwardWheel = true;
                 Settings.InteractionDefaultsVersion = 2;
+                interactionDefaultsMigrated = true;
+            }
+            if (Settings.InteractionDefaultsVersion < 3)
+            {
+                Settings.InteractionForwardKeyboard = true;
+                Settings.InteractionDefaultsVersion = 3;
                 interactionDefaultsMigrated = true;
             }
             if (interactionDefaultsMigrated)

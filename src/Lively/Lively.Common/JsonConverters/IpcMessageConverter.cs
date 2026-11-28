@@ -37,6 +37,7 @@ namespace Lively.Common.JsonConverters
                 MessageType.msg_screenshot => jo.ToObject<LivelyMessageScreenshot>(serializer),
                 MessageType.msg_wploaded => jo.ToObject<LivelyMessageWallpaperLoaded>(serializer),
                 MessageType.lp_dropdown_scaler => jo.ToObject<LivelyDropdownScaler>(serializer),
+                MessageType.msg_input_keyboard => jo.ToObject<LivelyKeyboardInput>(serializer),
                 _ => null,
             };
         }

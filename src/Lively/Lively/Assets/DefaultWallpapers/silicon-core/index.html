@@ -1,0 +1,1065 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#03070c" />
+  <title>硅核监控</title>
+  <style>
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+      background: #03070c;
+      overflow: hidden;
+    }
+
+    body {
+      cursor: crosshair;
+      user-select: none;
+      -webkit-user-select: none;
+      animation: appear 1.4s ease .1s both;
+    }
+
+    @keyframes appear {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    #scene {
+      position: fixed;
+      inset: 0;
+      /* canvas 是替换元素，必须显式撑满，否则高分屏会按缓冲区尺寸放大裁切 */
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .vignette {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(85% 80% at 50% 46%, rgba(0, 0, 0, 0) 42%, rgba(0, 0, 0, .34) 76%, rgba(0, 2, 6, .78) 100%);
+    }
+
+    .scan {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .16;
+      background: repeating-linear-gradient(to bottom,
+          rgba(120, 220, 255, .10) 0px,
+          rgba(120, 220, 255, .10) 1px,
+          rgba(0, 0, 0, 0) 1px,
+          rgba(0, 0, 0, 0) 3px);
+      mix-blend-mode: screen;
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="scene"></canvas>
+  <div class="vignette"></div>
+  <div class="scan"></div>
+
+  <script>
+    (function () {
+      'use strict';
+
+      var TAU = Math.PI * 2;
+      var canvas = document.getElementById('scene');
+      var ctx = canvas.getContext('2d', { alpha: false });
+      var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+      var W = 0, H = 0, dpr = 1;
+      var time = 0, lastDraw = 0, lastInput = performance.now(), eco = 0;
+      var bootAt = performance.now();
+
+      var pointer = { x: 0.5, y: 0.5, sx: 0.5, sy: 0.5, active: false, down: false };
+      var ripples = [];
+
+      var ACCENT = {
+        cpu: '#3df2ff',
+        gpu: '#ff4fd8',
+        mem: '#ffc857',
+        net: '#6bffb0'
+      };
+
+      /* ---------------- 数据层 ---------------- */
+
+      var HIST_LEN = 600;       // 600 点 × 100ms = 60s 缓冲
+      var SAMPLE_MS = 100;
+      var winN = 180;           // 当前显示窗口（18s），滚轮可切换
+      var hist = {
+        cpu: new Array(HIST_LEN).fill(0),
+        gpu: new Array(HIST_LEN).fill(0),
+        mem: new Array(HIST_LEN).fill(0),
+        dn: new Array(HIST_LEN).fill(0),
+        up: new Array(HIST_LEN).fill(0)
+      };
+      var target = { cpu: 18, gpu: 12, mem: 32, dn: 40, up: 12 };
+      var shown = { cpu: 18, gpu: 12, mem: 32, dn: 40, up: 12 };
+      var hostSeenAt = -1e9;
+      var meta = { cpuName: '', gpuName: '', ramTotalMb: 0, ramUsedMb: 0 };
+      var sampleAcc = 0;
+      var hoverPanel = null;
+      var pinnedType = null;
+      var coreBurst = 0;
+      var surge = 0;
+      var hintStart = 0;
+
+      function seedHistory() {
+        for (var i = 0; i < HIST_LEN; i++) {
+          var f = i / HIST_LEN;
+          hist.cpu[i] = 24 + Math.sin(i * 0.16) * 8 + Math.sin(i * 0.043 + 1.1) * 5;
+          hist.gpu[i] = 18 + Math.sin(i * 0.13 + 2.0) * 6 + Math.sin(i * 0.037) * 4;
+          hist.mem[i] = 38 + Math.sin(i * 0.05 + 0.6) * 4;
+          hist.dn[i] = 120 + Math.sin(i * 0.11 + 0.4) * 60 + Math.sin(i * 0.031) * 30;
+          hist.up[i] = 28 + Math.sin(i * 0.09 + 1.8) * 16;
+        }
+        shown.cpu = target.cpu = hist.cpu[HIST_LEN - 1];
+        shown.gpu = target.gpu = hist.gpu[HIST_LEN - 1];
+        shown.mem = target.mem = hist.mem[HIST_LEN - 1];
+        shown.dn = target.dn = hist.dn[HIST_LEN - 1];
+        shown.up = target.up = hist.up[HIST_LEN - 1];
+      }
+
+      function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+      function ingest(raw) {
+        if (!raw || typeof raw !== 'object') return;
+        var cpu = num(raw.cpu, raw.CurrentCpu);
+        var gpu = num(raw.gpu, raw.CurrentGpu3D);
+        var total = num(raw.ramTotalMb, raw.TotalRam);
+        var used = num(raw.ramUsedMb, null);
+        var avail = num(raw.CurrentRamAvail, null);
+        if (used == null && total && avail != null) used = Math.max(0, total - avail);
+
+        if (cpu != null) { target.cpu = clamp(cpu, 0, 100); hostSeenAt = time; }
+        if (gpu != null) { target.gpu = clamp(gpu, 0, 100); hostSeenAt = time; }
+        if (total && used != null) {
+          target.mem = clamp(used / total * 100, 0, 100);
+          meta.ramTotalMb = total;
+          meta.ramUsedMb = used;
+          hostSeenAt = time;
+        }
+        var dn = num(raw.netDownBps, raw.CurrentNetDown);
+        var up = num(raw.netUpBps, raw.CurrentNetUp);
+        if (dn != null) { target.dn = dn / 1024; hostSeenAt = time; }   // KB/s
+        if (up != null) { target.up = up / 1024; hostSeenAt = time; }
+
+        if (typeof raw.cpuName === 'string') meta.cpuName = raw.cpuName;
+        if (typeof raw.gpuName === 'string') meta.gpuName = raw.gpuName;
+        if (typeof raw.NameCpu === 'string') meta.cpuName = raw.NameCpu;
+        if (typeof raw.NameGpu === 'string') meta.gpuName = raw.NameGpu;
+      }
+
+      function num(a, b) {
+        if (typeof a === 'number' && isFinite(a)) return a;
+        if (typeof b === 'number' && isFinite(b)) return b;
+        return null;
+      }
+
+      // Lively 官方 SysInfo 通道（若宿主开启）
+      window.livelySystemInformation = function (args) {
+        try {
+          ingest(typeof args === 'string' ? JSON.parse(args) : args);
+        } catch (e) { }
+      };
+
+      function simulate(t) {
+        // 没有宿主数据时的演示曲线：缓慢漂移，避免画面死板
+        target.cpu = 16 + Math.sin(t * 0.37) * 9 + Math.sin(t * 1.13 + 1.2) * 5 + 12;
+        target.gpu = 12 + Math.sin(t * 0.29 + 2.1) * 7 + Math.sin(t * 0.91) * 4 + 8;
+        target.mem = 38 + Math.sin(t * 0.11) * 6 + Math.sin(t * 0.53) * 2;
+        target.dn = 180 + Math.sin(t * 0.5 + 0.4) * 120 + Math.sin(t * 1.7) * 60;
+        target.up = 40 + Math.sin(t * 0.63 + 1.8) * 28;
+      }
+
+      /* ---------------- 尺寸与布局 ---------------- */
+
+      var panels = [];
+
+      function resize() {
+        var rect = canvas.getBoundingClientRect();
+        W = rect.width || window.innerWidth;
+        H = rect.height || window.innerHeight;
+        dpr = Math.min(2, window.devicePixelRatio || 1);
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        buildLayout();
+        buildCircuits();
+      }
+
+      function buildLayout() {
+        var m = Math.min(W, H) * 0.045;
+        var top = H * 0.118;
+        var bottom = H - m * 0.9;
+        var gap = Math.min(W, H) * 0.020;
+        var left = m, right = W - m;
+        panels = [];
+
+        if (W >= H * 1.22) {
+          var aW = (right - left - gap) * 0.575;
+          var bx = left + aW + gap;
+          var bW = right - bx;
+          var hA = (bottom - top - gap) * 0.60;
+          var hB = bottom - top - gap - hA;
+          panels.push({ type: 'cpu', x: left, y: top, w: aW, h: hA });
+          panels.push({ type: 'mem', x: left, y: top + hA + gap, w: aW, h: hB });
+          var hC = (bottom - top - gap) * 0.63;
+          panels.push({ type: 'gpu', x: bx, y: top, w: bW, h: hA * 0.63 });
+          panels.push({ type: 'net', x: bx, y: top + hA * 0.63 + gap, w: bW, h: bottom - (top + hA * 0.63 + gap) });
+        } else {
+          var ph = (bottom - top - gap * 3) / 4;
+          var order = ['cpu', 'gpu', 'mem', 'net'];
+          for (var i = 0; i < 4; i++) {
+            panels.push({ type: order[i], x: left, y: top + i * (ph + gap), w: right - left, h: ph });
+          }
+        }
+      }
+
+      /* ---------------- 背景电路 ---------------- */
+
+      var circuits = [];
+      var nodes = [];
+
+      function buildCircuits() {
+        circuits = [];
+        nodes = [];
+        var count = Math.round(clamp((W * H) / 46000, 16, 34));
+        for (var i = 0; i < count; i++) {
+          var pts = [];
+          var vertical = Math.random() > 0.5;
+          var x = Math.random();
+          var y = Math.random();
+          pts.push({ x: x, y: y });
+          var segs = 3 + Math.floor(Math.random() * 4);
+          for (var s = 0; s < segs; s++) {
+            var len = 0.06 + Math.random() * 0.16;
+            if (vertical) y += (Math.random() > 0.5 ? 1 : -1) * len;
+            else x += (Math.random() > 0.5 ? 1 : -1) * len;
+            x = clamp(x, 0.02, 0.98);
+            y = clamp(y, 0.04, 0.96);
+            pts.push({ x: x, y: y });
+            vertical = !vertical;
+            if (Math.random() > 0.55) nodes.push({ x: x, y: y });
+          }
+          circuits.push({
+            pts: pts,
+            hue: Math.random() > 0.78 ? ACCENT.mem : ACCENT.cpu,
+            speed: 0.04 + Math.random() * 0.09,
+            pos: Math.random(),
+            len: 0
+          });
+        }
+      }
+
+      function circuitPath(p) {
+        ctx.beginPath();
+        for (var i = 0; i < p.pts.length; i++) {
+          var px = p.pts[i].x * W, py = p.pts[i].y * H;
+          if (i === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        }
+      }
+
+      function measureCircuit(p) {
+        var total = 0;
+        for (var i = 1; i < p.pts.length; i++) {
+          var a = p.pts[i - 1], b = p.pts[i];
+          total += Math.abs((a.x - b.x) * W) + Math.abs((a.y - b.y) * H);
+        }
+        return total || 1;
+      }
+
+      function drawCircuits(t) {
+        ctx.save();
+        ctx.lineWidth = 1;
+        for (var i = 0; i < circuits.length; i++) {
+          var c = circuits[i];
+          circuitPath(c);
+          ctx.strokeStyle = hexA('#3aa8c8', 0.10);
+          ctx.stroke();
+
+          // 拐点焊盘
+          ctx.fillStyle = hexA('#7fe8ff', 0.18);
+          for (var k = 1; k < c.pts.length - 1; k++) {
+            ctx.fillRect(c.pts[k].x * W - 1.5, c.pts[k].y * H - 1.5, 3, 3);
+          }
+
+          // 流动脉冲
+          if (!c.len) c.len = measureCircuit(c);
+          c.pos += c.speed * (reduceMotion ? 0.1 : 1) * (0.6 + shown.cpu / 70 + surge * 2.6) * 0.016;
+          if (c.pos > 1) c.pos -= 1;
+          var p = pointOnPolyline(c, c.pos);
+          var glow = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, 9);
+          glow.addColorStop(0, hexA(c.hue, 0.38));
+          glow.addColorStop(1, hexA(c.hue, 0));
+          ctx.fillStyle = glow;
+          ctx.fillRect(p.x - 9, p.y - 9, 18, 18);
+          ctx.fillStyle = hexA(c.hue, 0.9);
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 1.6, 0, TAU);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+
+      function pointOnPolyline(c, u) {
+        var total = c.len;
+        var want = total * u;
+        for (var i = 1; i < c.pts.length; i++) {
+          var a = c.pts[i - 1], b = c.pts[i];
+          var len = Math.abs((a.x - b.x) * W) + Math.abs((a.y - b.y) * H);
+          if (want <= len) {
+            var f = len ? want / len : 0;
+            return {
+              x: (a.x + (b.x - a.x) * f) * W,
+              y: (a.y + (b.y - a.y) * f) * H
+            };
+          }
+          want -= len;
+        }
+        var last = c.pts[c.pts.length - 1];
+        return { x: last.x * W, y: last.y * H };
+      }
+
+      /* ---------------- 中央晶粒 ---------------- */
+
+      function drawDie(t) {
+        var cx = W * 0.5 + (pointer.sx - 0.5) * W * 0.012;
+        var cy = H * 0.5 + (pointer.sy - 0.5) * H * 0.010;
+        var R = Math.min(W, H) * 0.30;
+        var load = clamp(shown.cpu / 100 + surge * 0.5, 0, 1.2);
+
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(reduceMotion ? 0 : t * 0.035);
+
+        // 外环刻度
+        ctx.strokeStyle = hexA('#2e7f9a', 0.20);
+        ctx.lineWidth = 1;
+        for (var i = 0; i < 48; i++) {
+          var a = (i / 48) * TAU;
+          var r1 = R * (i % 4 === 0 ? 0.92 : 0.955);
+          ctx.beginPath();
+          ctx.moveTo(Math.cos(a) * r1, Math.sin(a) * r1);
+          ctx.lineTo(Math.cos(a) * R, Math.sin(a) * R);
+          ctx.stroke();
+        }
+
+        // 六边形晶粒
+        ctx.beginPath();
+        for (var k = 0; k < 6; k++) {
+          var ang = (k / 6) * TAU - Math.PI / 2;
+          var px = Math.cos(ang) * R * 0.78;
+          var py = Math.sin(ang) * R * 0.78;
+          if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        var grad = ctx.createRadialGradient(0, 0, 0, 0, 0, R * 0.8);
+        grad.addColorStop(0, hexA('#0d3b4a', 0.20 + load * 0.16));
+        grad.addColorStop(0.7, hexA('#07222c', 0.16));
+        grad.addColorStop(1, hexA('#041218', 0));
+        ctx.fillStyle = grad;
+        ctx.fill();
+        ctx.strokeStyle = hexA('#49dcff', 0.16 + load * 0.16);
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+
+        // 内部走线网格
+        ctx.save();
+        ctx.beginPath();
+        for (var k2 = 0; k2 < 6; k2++) {
+          var ang2 = (k2 / 6) * TAU - Math.PI / 2;
+          var px2 = Math.cos(ang2) * R * 0.78;
+          var py2 = Math.sin(ang2) * R * 0.78;
+          if (k2 === 0) ctx.moveTo(px2, py2); else ctx.lineTo(px2, py2);
+        }
+        ctx.closePath();
+        ctx.clip();
+        ctx.strokeStyle = hexA('#3ec8e6', 0.10);
+        var step = R * 0.13;
+        for (var gx = -R; gx < R; gx += step) {
+          ctx.beginPath();
+          ctx.moveTo(gx, -R);
+          ctx.lineTo(gx, R);
+          ctx.stroke();
+        }
+        for (var gy = -R; gy < R; gy += step) {
+          ctx.beginPath();
+          ctx.moveTo(-R, gy);
+          ctx.lineTo(R, gy);
+          ctx.stroke();
+        }
+        // 核心脉冲
+        var pulse = 0.55 + 0.45 * Math.sin(t * 1.6);
+        var core = ctx.createRadialGradient(0, 0, 0, 0, 0, R * 0.4);
+        core.addColorStop(0, hexA('#8ff6ff', 0.10 + load * 0.28 * pulse));
+        core.addColorStop(1, hexA('#2fb9d8', 0));
+        ctx.fillStyle = core;
+        ctx.fillRect(-R, -R, R * 2, R * 2);
+        ctx.restore();
+
+        // 引脚
+        ctx.strokeStyle = hexA('#2f8ba6', 0.22);
+        ctx.lineWidth = 1;
+        for (var pk = 0; pk < 36; pk++) {
+          var pa = (pk / 36) * TAU;
+          var inner = R * 0.80;
+          var outer = R * (pk % 3 === 0 ? 0.88 : 0.855);
+          ctx.beginPath();
+          ctx.moveTo(Math.cos(pa) * inner, Math.sin(pa) * inner);
+          ctx.lineTo(Math.cos(pa) * outer, Math.sin(pa) * outer);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      /* ---------------- 面板绘制 ---------------- */
+
+      function roundRect(x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + w, y, x + w, y + h, r);
+        ctx.arcTo(x + w, y + h, x, y + h, r);
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
+      }
+
+      function hexA(hex, a) {
+        var r = parseInt(hex.slice(1, 3), 16);
+        var g = parseInt(hex.slice(3, 5), 16);
+        var b = parseInt(hex.slice(5, 7), 16);
+        return 'rgba(' + r + ',' + g + ',' + b + ',' + clamp(a, 0, 1).toFixed(3) + ')';
+      }
+
+      function spacedText(text, x, y, spacing) {
+        var total = 0;
+        var i;
+        for (i = 0; i < text.length; i++) total += ctx.measureText(text[i]).width + spacing;
+        var cur = x;
+        for (i = 0; i < text.length; i++) {
+          ctx.fillText(text[i], cur, y);
+          cur += ctx.measureText(text[i]).width + spacing;
+        }
+        return total;
+      }
+
+      function drawPanel(p, t) {
+        var pad = clamp(Math.min(p.w, p.h) * 0.07, 8, 18);
+        var accent = ACCENT[p.type];
+
+        // 面板底
+        roundRect(p.x, p.y, p.w, p.h, 4);
+        var bg = ctx.createLinearGradient(p.x, p.y, p.x + p.w, p.y + p.h);
+        bg.addColorStop(0, 'rgba(8,18,28,0.62)');
+        bg.addColorStop(1, 'rgba(4,10,16,0.46)');
+        ctx.fillStyle = bg;
+        ctx.fill();
+        ctx.strokeStyle = hexA(accent, 0.16);
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // 四角标记
+        var cl = Math.min(p.w, p.h) * 0.06;
+        ctx.strokeStyle = hexA(accent, 0.55);
+        ctx.lineWidth = 1.4;
+        var corners = [
+          [p.x, p.y, 1, 1], [p.x + p.w, p.y, -1, 1],
+          [p.x, p.y + p.h, 1, -1], [p.x + p.w, p.y + p.h, -1, -1]
+        ];
+        for (var ci = 0; ci < 4; ci++) {
+          var c = corners[ci];
+          ctx.beginPath();
+          ctx.moveTo(c[0] + c[2] * cl, c[1]);
+          ctx.lineTo(c[0], c[1]);
+          ctx.lineTo(c[0], c[1] + c[3] * cl);
+          ctx.stroke();
+        }
+
+        var titleSize = clamp(p.h * 0.058, 9, 12);
+        var bigSize = clamp(p.h * 0.235, 22, 58);
+        var smallSize = clamp(p.h * 0.052, 8.5, 11);
+
+        // 标题
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+        ctx.font = '600 ' + titleSize.toFixed(1) + 'px "Cascadia Mono", Consolas, "SFMono-Regular", monospace';
+        ctx.fillStyle = hexA(accent, 0.82);
+        var label = p.type === 'cpu' ? 'CPU // PROCESSOR'
+          : p.type === 'gpu' ? 'GPU // GRAPHICS'
+            : p.type === 'mem' ? 'MEM // MEMORY' : 'NET // TRAFFIC';
+        spacedText(label, p.x + pad, p.y + pad + titleSize, titleSize * 0.16);
+
+        // 数值
+        var val, unit;
+        if (p.type === 'net') {
+          val = fmtRate(shown.dn);
+          unit = '/s';
+        } else {
+          val = (p.type === 'cpu' ? shown.cpu : p.type === 'gpu' ? shown.gpu : shown.mem).toFixed(1);
+          unit = '%';
+        }
+        ctx.textAlign = 'right';
+        ctx.fillStyle = '#e8f6ff';
+        ctx.font = '600 ' + bigSize.toFixed(1) + 'px "Cascadia Mono", Consolas, monospace';
+        var unitW = 0;
+        if (unit) {
+          ctx.font = '500 ' + (bigSize * 0.34).toFixed(1) + 'px "Cascadia Mono", Consolas, monospace';
+          unitW = ctx.measureText(unit).width + pad * 0.35;
+          ctx.fillStyle = hexA(accent, 0.75);
+          ctx.fillText(unit, p.x + p.w - pad, p.y + pad + bigSize * 0.82);
+        }
+        ctx.font = '600 ' + bigSize.toFixed(1) + 'px "Cascadia Mono", Consolas, monospace';
+        ctx.fillStyle = '#e8f6ff';
+        ctx.fillText(val, p.x + p.w - pad - unitW, p.y + pad + bigSize * 0.82);
+
+        // 副标题（型号 / 状态）
+        ctx.textAlign = 'left';
+        ctx.fillStyle = 'rgba(150,196,222,0.55)';
+        ctx.font = '400 ' + smallSize.toFixed(1) + 'px "Cascadia Mono", Consolas, monospace';
+        var sub = '';
+        if (p.type === 'cpu') sub = meta.cpuName ? trimName(meta.cpuName, 44) : 'HOST TELEMETRY // ' + (isHostLive() ? 'LINKED' : 'DEMO');
+        else if (p.type === 'gpu') sub = meta.gpuName ? trimName(meta.gpuName, 42) : 'HOST TELEMETRY // ' + (isHostLive() ? 'LINKED' : 'DEMO');
+        else if (p.type === 'mem') sub = meta.ramTotalMb ? (meta.ramUsedMb / 1024).toFixed(1) + ' / ' + (meta.ramTotalMb / 1024).toFixed(1) + ' GB' : 'ALLOCATION';
+        else sub = 'UP ' + fmtRate(shown.up) + '/s   ·   ' + (isHostLive() ? 'HOST' : 'DEMO');
+        ctx.fillText(sub, p.x + pad, p.y + pad + bigSize * 0.86 + smallSize * 0.7);
+
+        // 分段电平条：半导体仪表质感
+        if (p.type !== 'net') {
+          var pct = p.type === 'cpu' ? shown.cpu : p.type === 'gpu' ? shown.gpu : shown.mem;
+          var barY = p.y + pad + bigSize * 0.86 + smallSize * 1.9;
+          var barW = p.w - pad * 2;
+          var segs = Math.max(24, Math.round(barW / 9));
+          var segW = barW / segs;
+          var lit = Math.round(segs * clamp(pct / 100, 0, 1));
+          for (var si = 0; si < segs; si++) {
+            var on = si < lit;
+            ctx.fillStyle = on
+              ? hexA(accent, 0.20 + 0.62 * (si / segs))
+              : 'rgba(72,120,145,0.10)';
+            ctx.fillRect(p.x + pad + si * segW, barY, Math.max(1, segW - 2), 4);
+          }
+        }
+
+        // 图表区域
+        var chartY = p.y + p.h * 0.50;
+        var chartH = p.h - (chartY - p.y) - pad * 2.4;
+        var chartX = p.x + pad;
+        var chartW = p.w - pad * 2;
+        drawChart(chartX, chartY, chartW, chartH, p, accent, t);
+
+        // 底部统计
+        ctx.font = '400 ' + smallSize.toFixed(1) + 'px "Cascadia Mono", Consolas, monospace';
+        ctx.fillStyle = 'rgba(140,186,210,0.55)';
+        ctx.textAlign = 'left';
+        var sT = p.type === 'net' ? tailN(hist.dn).concat(tailN(hist.up)) : tailN(hist[p.type]);
+        var st = stats(sT);
+        ctx.fillText('AVG ' + st.avg.toFixed(1) + (p.type === 'net' ? ' KB/s' : '%'), chartX, p.y + p.h - pad * 0.55);
+        ctx.textAlign = 'right';
+        ctx.fillText('PEAK ' + st.peak.toFixed(1), chartX + chartW, p.y + p.h - pad * 0.55);
+
+        if (pinnedType === p.type) {
+          ctx.textAlign = 'right';
+          ctx.fillStyle = hexA(accent, 0.7);
+          ctx.font = '400 ' + (smallSize * 0.92).toFixed(1) + 'px "Cascadia Mono", Consolas, monospace';
+          ctx.fillText('LOCK', p.x + p.w - pad, p.y + pad + titleSize);
+        }
+
+        // 锁定其他面板时压暗，突出关注对象
+        if (pinnedType && pinnedType !== p.type) {
+          roundRect(p.x, p.y, p.w, p.h, 4);
+          ctx.fillStyle = 'rgba(2,6,10,0.55)';
+          ctx.fill();
+        }
+      }
+
+      function trimName(s, n) {
+        if (!s) return '';
+        return s.length > n ? s.slice(0, n - 1) + '…' : s;
+      }
+
+      function isHostLive() {
+        return (time - hostSeenAt) < 2.6;
+      }
+
+      function fmtRate(kbps) {
+        if (!isFinite(kbps) || kbps <= 0) return '0 B';
+        if (kbps < 1024) return kbps.toFixed(0) + ' KB';
+        return (kbps / 1024).toFixed(1) + ' MB';
+      }
+
+      function stats(arr) {
+        var sum = 0, peak = 0;
+        for (var i = 0; i < arr.length; i++) {
+          sum += arr[i];
+          if (arr[i] > peak) peak = arr[i];
+        }
+        return { avg: sum / (arr.length || 1), peak: peak };
+      }
+
+      function drawChart(x, y, w, h, p, accent, t) {
+        if (w <= 2 || h <= 2) return;
+
+        var series, second = null, max;
+        if (p.type === 'net') {
+          var dn = tailN(hist.dn);
+          second = tailN(hist.up);
+          max = Math.max(64, stats(dn).peak, stats(second).peak) * 1.2;
+          series = dn;
+        } else {
+          series = tailN(hist[p.type]);
+          max = 100;
+        }
+
+        // 网格
+        ctx.save();
+        ctx.strokeStyle = 'rgba(88,160,190,0.10)';
+        ctx.lineWidth = 1;
+        for (var i = 0; i <= 4; i++) {
+          var gy = y + (h / 4) * i;
+          ctx.beginPath();
+          ctx.moveTo(x, gy);
+          ctx.lineTo(x + w, gy);
+          ctx.stroke();
+        }
+        var cols = 6;
+        for (var j = 0; j <= cols; j++) {
+          var gx = x + (w / cols) * j;
+          ctx.beginPath();
+          ctx.moveTo(gx, y);
+          ctx.lineTo(gx, y + h);
+          ctx.stroke();
+        }
+
+        if (second) drawSeries(x, y, w, h, second, max, '#8f7bff', 0.16);
+        drawSeries(x, y, w, h, series, max, accent, 0.30);
+
+        // 悬停探针：十字线与该时刻采样值
+        if (hoverPanel === p && series.length > 1) {
+          var u = clamp((pointer.x * W - x) / w, 0, 1);
+          var idx = Math.round(u * (series.length - 1));
+          var px = x + (idx / (series.length - 1)) * w;
+          var py = y + h - clamp(series[idx] / max, 0, 1) * h;
+
+          ctx.strokeStyle = 'rgba(214,244,255,0.22)';
+          ctx.setLineDash([3, 4]);
+          ctx.beginPath();
+          ctx.moveTo(px, y);
+          ctx.lineTo(px, y + h);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          ctx.fillStyle = '#ffffff';
+          ctx.beginPath();
+          ctx.arc(px, py, 2.4, 0, TAU);
+          ctx.fill();
+
+          var txt = p.type === 'net'
+            ? fmtRate(series[idx]) + '/s'
+            : series[idx].toFixed(1) + '%';
+          ctx.font = '400 10px "Cascadia Mono", Consolas, monospace';
+          var tw = ctx.measureText(txt).width + 12;
+          var bx = px + 8;
+          if (bx + tw > x + w) bx = px - tw - 8;
+          var by = Math.max(y - 2, py - 22);
+          ctx.fillStyle = 'rgba(4,10,16,0.92)';
+          ctx.fillRect(bx, by, tw, 16);
+          ctx.strokeStyle = hexA(accent, 0.4);
+          ctx.strokeRect(bx + 0.5, by + 0.5, tw - 1, 15);
+          ctx.fillStyle = hexA(accent, 0.95);
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(txt, bx + 6, by + 8.5);
+          ctx.textBaseline = 'alphabetic';
+        }
+        ctx.restore();
+      }
+
+      function tailN(arr) {
+        return arr.slice(Math.max(0, arr.length - winN));
+      }
+
+      function drawSeries(x, y, w, h, data, max, color, fillA) {
+        var n = data.length;
+        var step = w / (n - 1);
+        var path = new Path2D();
+        for (var i = 0; i < n; i++) {
+          var px = x + i * step;
+          var py = y + h - clamp(data[i] / max, 0, 1) * h;
+          if (i === 0) path.moveTo(px, py);
+          else {
+            var prevX = x + (i - 1) * step;
+            var prevY = y + h - clamp(data[i - 1] / max, 0, 1) * h;
+            var mx = (prevX + px) / 2;
+            path.quadraticCurveTo(prevX, prevY, mx, (prevY + py) / 2);
+          }
+        }
+        var lastX = x + (n - 1) * step;
+        var lastY = y + h - clamp(data[n - 1] / max, 0, 1) * h;
+        path.lineTo(lastX, lastY);
+
+        // 面积
+        var area = new Path2D(path);
+        area.lineTo(x + w, y + h);
+        area.lineTo(x, y + h);
+        area.closePath();
+        var grad = ctx.createLinearGradient(0, y, 0, y + h);
+        grad.addColorStop(0, hexA(color, fillA));
+        grad.addColorStop(1, hexA(color, 0));
+        ctx.fillStyle = grad;
+        ctx.fill(area);
+
+        // 主线 + 柔光
+        ctx.strokeStyle = hexA(color, 0.18);
+        ctx.lineWidth = 3.4;
+        ctx.stroke(path);
+        ctx.strokeStyle = hexA(color, 0.92);
+        ctx.lineWidth = 1.5;
+        ctx.stroke(path);
+
+        // 当前点
+        var pulse = 0.5 + 0.5 * Math.sin(time * 3.4);
+        var dot = ctx.createRadialGradient(lastX, lastY, 0, lastX, lastY, 9);
+        dot.addColorStop(0, hexA(color, 0.5 + pulse * 0.3));
+        dot.addColorStop(1, hexA(color, 0));
+        ctx.fillStyle = dot;
+        ctx.fillRect(lastX - 9, lastY - 9, 18, 18);
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(lastX, lastY, 1.8, 0, TAU);
+        ctx.fill();
+      }
+
+      /* ---------------- 顶部状态栏 ---------------- */
+
+      function drawHeader(t) {
+        var m = W * 0.045;
+        var y = H * 0.072;
+
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+        ctx.font = '700 ' + clamp(H * 0.024, 12, 20).toFixed(1) + 'px "Cascadia Mono", Consolas, monospace';
+        ctx.fillStyle = 'rgba(222,244,255,0.94)';
+        spacedText('SILICON CORE', m, y, 2.4);
+
+        var glyphX = m + 8;
+        ctx.strokeStyle = hexA(ACCENT.cpu, 0.7);
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(glyphX, y - clamp(H * 0.024, 12, 20) * 0.78);
+        ctx.lineTo(glyphX + 8, y - clamp(H * 0.024, 12, 20) * 0.5);
+        ctx.lineTo(glyphX, y - clamp(H * 0.024, 12, 20) * 0.22);
+        ctx.closePath();
+        ctx.stroke();
+
+        // 副标题
+        ctx.font = '400 ' + clamp(H * 0.013, 8, 11).toFixed(1) + 'px "Cascadia Mono", Consolas, monospace';
+        ctx.fillStyle = 'rgba(130,182,208,0.6)';
+        spacedText('SYSTEM TELEMETRY / LIVE BUS', m + 2, y + H * 0.022, 1.4);
+
+        // 右侧信息
+        var now = new Date();
+        var hh = String(now.getHours()).padStart(2, '0');
+        var mm = String(now.getMinutes()).padStart(2, '0');
+        var ss = String(now.getSeconds()).padStart(2, '0');
+        var dateStr = now.getFullYear() + '.' + String(now.getMonth() + 1).padStart(2, '0') + '.' + String(now.getDate()).padStart(2, '0');
+        var wd = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'][now.getDay()];
+
+        ctx.textAlign = 'right';
+        var bigTime = clamp(H * 0.021, 11, 17).toFixed(1);
+        ctx.font = '600 ' + bigTime + 'px "Cascadia Mono", Consolas, monospace';
+        var timeW = ctx.measureText(hh + ':' + mm + ':' + ss).width;
+        ctx.fillStyle = 'rgba(226,244,255,0.9)';
+        ctx.fillText(hh + ':' + mm + ':' + ss, W - m, y);
+
+        ctx.font = '400 ' + clamp(H * 0.012, 8, 11).toFixed(1) + 'px "Cascadia Mono", Consolas, monospace';
+        ctx.fillStyle = 'rgba(140,186,210,0.6)';
+        ctx.fillText(dateStr + '  ' + wd + '   ·   ' + Math.round(fps) + ' FPS', W - m, y + H * 0.022);
+
+        // 数据链路指示（放在时间左侧，避免与日期重叠）
+        var live = isHostLive();
+        var dotX = W - m - timeW - 22;
+        var dotY = y - 4;
+        var linkText = live ? 'LINK: HOST' : 'LINK: DEMO';
+        ctx.textAlign = 'right';
+        ctx.fillStyle = live ? hexA(ACCENT.net, 0.75) : hexA(ACCENT.mem, 0.7);
+        ctx.fillText(linkText, dotX - 9, dotY + 3.5);
+        ctx.beginPath();
+        ctx.arc(dotX, dotY, 3, 0, TAU);
+        ctx.fillStyle = live ? hexA(ACCENT.net, 0.9) : hexA(ACCENT.mem, 0.8);
+        ctx.fill();
+
+        // 顶部分隔线
+        ctx.strokeStyle = 'rgba(80,170,200,0.16)';
+        ctx.beginPath();
+        ctx.moveTo(m, H * 0.098);
+        ctx.lineTo(W - m, H * 0.098);
+        ctx.stroke();
+      }
+
+      /* ---------------- 交互与循环 ---------------- */
+
+      function toLocal(e) {
+        var rect = canvas.getBoundingClientRect();
+        return {
+          x: (e.clientX - rect.left) / (rect.width || 1),
+          y: (e.clientY - rect.top) / (rect.height || 1)
+        };
+      }
+
+      function markInput() {
+        lastInput = performance.now();
+        eco = 0;
+      }
+
+      function panelAt(px, py) {
+        for (var i = 0; i < panels.length; i++) {
+          var p = panels[i];
+          if (px >= p.x && px <= p.x + p.w && py >= p.y && py <= p.y + p.h) return p;
+        }
+        return null;
+      }
+
+      window.addEventListener('pointermove', function (e) {
+        var p = toLocal(e);
+        pointer.x = p.x;
+        pointer.y = p.y;
+        pointer.active = true;
+        hoverPanel = panelAt(p.x * W, p.y * H);
+        markInput();
+      }, { passive: true });
+
+      window.addEventListener('pointerleave', function () {
+        pointer.active = false;
+        hoverPanel = null;
+      });
+
+      window.addEventListener('pointerdown', function (e) {
+        var p = toLocal(e);
+        pointer.down = true;
+        var px = p.x * W, py = p.y * H;
+        var cx = W * 0.5, cy = H * 0.5;
+        var dieR = Math.min(W, H) * 0.20;
+        if (Math.hypot(px - cx, py - cy) < dieR) {
+          // 晶核扫描
+          coreBurst = 1;
+          surge = 1;
+        } else {
+          var pnl = panelAt(px, py);
+          if (pnl) pinnedType = (pinnedType === pnl.type) ? null : pnl.type;
+        }
+        ripples.push({ x: p.x, y: p.y, r: 0, life: 1 });
+        markInput();
+      });
+
+      window.addEventListener('pointerup', function () {
+        pointer.down = false;
+      });
+
+      window.addEventListener('wheel', function (e) {
+        if (!panelAt(e.clientX, e.clientY)) return;
+        e.preventDefault();
+        var steps = [180, 360, 600];
+        var i = steps.indexOf(winN);
+        if (i < 0) i = 0;
+        winN = steps[(i + (e.deltaY > 0 ? 1 : steps.length - 1)) % steps.length];
+        markInput();
+      }, { passive: false });
+
+      window.addEventListener('keydown', function (e) {
+        var order = ['cpu', 'gpu', 'mem', 'net'];
+        var idx = order.indexOf(pinnedType);
+        if (e.key >= '1' && e.key <= '4') {
+          var want = order[parseInt(e.key, 10) - 1];
+          pinnedType = pinnedType === want ? null : want;
+        } else if (e.key === 'Escape') {
+          pinnedType = null;
+        } else if (e.key === ' ') {
+          coreBurst = 1;
+          surge = 1;
+          e.preventDefault();
+        }
+        markInput();
+      });
+
+      window.addEventListener('resize', resize);
+
+      window.addEventListener('contactable:env', function () { });
+
+      var fps = 60, fpsAcc = 0, fpsCount = 0;
+
+      function frame(ts) {
+        requestAnimationFrame(frame);
+        var dt = Math.min(0.05, (ts - lastDraw) / 1000 || 0);
+        lastDraw = ts;
+        fpsAcc += dt;
+        fpsCount++;
+        if (fpsAcc > 0.5) {
+          fps = fpsCount / fpsAcc;
+          fpsAcc = 0;
+          fpsCount = 0;
+        }
+
+        if (ts - lastInput > 4500) eco = 1;
+        if (eco && !reduceMotion) {
+          // 空闲时降到 30fps
+          if (Math.floor(ts / 33.34) % 2 === 0) return;
+        }
+
+        time += dt;
+        coreBurst = Math.max(0, coreBurst - dt * 0.75);
+        surge = Math.max(0, surge - dt * 0.5);
+
+        if (typeof window.contactableStats !== 'undefined') ingest(window.contactableStats);
+        if (!isHostLive()) simulate(time);
+
+        // 平滑显示值
+        var k = Math.min(1, dt * 3.2);
+        shown.cpu += (target.cpu - shown.cpu) * k;
+        shown.gpu += (target.gpu - shown.gpu) * k;
+        shown.mem += (target.mem - shown.mem) * k;
+        shown.dn += (target.dn - shown.dn) * k;
+        shown.up += (target.up - shown.up) * k;
+
+        // 采样入历史（100ms）
+        sampleAcc += dt * 1000;
+        while (sampleAcc >= SAMPLE_MS) {
+          sampleAcc -= SAMPLE_MS;
+          pushHist('cpu', shown.cpu);
+          pushHist('gpu', shown.gpu);
+          pushHist('mem', shown.mem);
+          pushHist('dn', shown.dn);
+          pushHist('up', shown.up);
+        }
+
+        pointer.sx += (pointer.x - pointer.sx) * Math.min(1, dt * 4);
+        pointer.sy += (pointer.y - pointer.sy) * Math.min(1, dt * 4);
+
+        render(dt);
+      }
+
+      function pushHist(key, v) {
+        var arr = hist[key];
+        arr.push(v);
+        if (arr.length > HIST_LEN) arr.shift();
+      }
+
+      function render(dt) {
+        // 背景
+        var bg = ctx.createRadialGradient(W * 0.5, H * 0.45, 0, W * 0.5, H * 0.45, Math.max(W, H) * 0.8);
+        bg.addColorStop(0, '#071420');
+        bg.addColorStop(0.45, '#040c14');
+        bg.addColorStop(1, '#02060a');
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, W, H);
+
+        drawGrid();
+        drawCircuits(time);
+        drawDie(time);
+
+        // 点击涟漪
+        for (var i = ripples.length - 1; i >= 0; i--) {
+          var rp = ripples[i];
+          rp.r += dt * 0.62;
+          rp.life -= dt * 0.7;
+          if (rp.life <= 0) { ripples.splice(i, 1); continue; }
+          ctx.strokeStyle = hexA(ACCENT.cpu, rp.life * 0.5);
+          ctx.lineWidth = 1.4;
+          ctx.beginPath();
+          ctx.arc(rp.x * W, rp.y * H, rp.r * Math.min(W, H) * 0.6, 0, TAU);
+          ctx.stroke();
+          ctx.strokeStyle = hexA(ACCENT.cpu, rp.life * 0.22);
+          ctx.beginPath();
+          ctx.arc(rp.x * W, rp.y * H, rp.r * Math.min(W, H) * 0.42, 0, TAU);
+          ctx.stroke();
+        }
+
+        drawHeader(time);
+        for (var p = 0; p < panels.length; p++) drawPanel(panels[p], time);
+
+        // 晶核扫描波
+        if (coreBurst > 0) {
+          var bx = W * 0.5, by = H * 0.5;
+          var base = Math.min(W, H) * 0.30;
+          for (var b = 0; b < 3; b++) {
+            var ph = (1 - coreBurst) * 1.2 + b * 0.18;
+            ctx.strokeStyle = hexA(b % 2 ? ACCENT.net : ACCENT.cpu, coreBurst * (0.5 - b * 0.12));
+            ctx.lineWidth = 1.6;
+            ctx.beginPath();
+            ctx.arc(bx, by, base * (0.5 + ph), 0, TAU);
+            ctx.stroke();
+          }
+          ctx.save();
+          ctx.translate(bx, by);
+          ctx.strokeStyle = hexA(ACCENT.cpu, coreBurst * 0.7);
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          var hr = base * (0.55 + (1 - coreBurst) * 0.9);
+          for (var hk = 0; hk < 7; hk++) {
+            var ha = (hk / 6) * TAU - Math.PI / 2;
+            var hx = Math.cos(ha) * hr, hy = Math.sin(ha) * hr;
+            if (hk === 0) ctx.moveTo(hx, hy); else ctx.lineTo(hx, hy);
+          }
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        // 底部操作提示（数秒后淡出）
+        var hintA = clamp(1 - time / 12, 0, 1) * 0.5;
+        if (hintA > 0.01) {
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'alphabetic';
+          ctx.font = '400 ' + clamp(H * 0.012, 8, 10.5).toFixed(1) + 'px "Cascadia Mono", Consolas, monospace';
+          ctx.fillStyle = 'rgba(150,200,225,' + hintA.toFixed(3) + ')';
+          ctx.fillText('滚轮 切换时间窗 ' + (winN / 10) + 's   ·   点击面板 锁定 ' + (pinnedType || '—') + '   ·   点击晶核 / 空格 扫描', W * 0.5, H * 0.985);
+        }
+
+        // 右上角扫描光
+        if (!reduceMotion) {
+          var sx = ((time * 0.06) % 1.3 - 0.15) * W;
+          var sg = ctx.createLinearGradient(sx - W * 0.12, 0, sx + W * 0.12, 0);
+          sg.addColorStop(0, 'rgba(90,200,230,0)');
+          sg.addColorStop(0.5, 'rgba(90,200,230,0.035)');
+          sg.addColorStop(1, 'rgba(90,200,230,0)');
+          ctx.fillStyle = sg;
+          ctx.fillRect(0, 0, W, H);
+        }
+      }
+
+      function drawGrid() {
+        ctx.strokeStyle = 'rgba(56,120,150,0.055)';
+        ctx.lineWidth = 1;
+        var step = Math.max(28, Math.min(W, H) * 0.045);
+        for (var x = (W % step) / 2; x < W; x += step) {
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, H);
+          ctx.stroke();
+        }
+        for (var y = (H % step) / 2; y < H; y += step) {
+          ctx.beginPath();
+          ctx.moveTo(0, y);
+          ctx.lineTo(W, y);
+          ctx.stroke();
+        }
+      }
+
+      seedHistory();
+      resize();
+      requestAnimationFrame(function (ts) {
+        lastDraw = ts;
+        requestAnimationFrame(frame);
+      });
+    })();
+  </script>
+</body>
+
+</html>

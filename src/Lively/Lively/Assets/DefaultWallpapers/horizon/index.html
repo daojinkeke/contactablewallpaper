@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#02030a" />
+  <title>事件视界</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #02030a;
+      cursor: crosshair;
+      user-select: none;
+      -webkit-user-select: none;
+      animation: appear 1.4s ease .05s both;
+    }
+
+    @keyframes appear {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    #stage {
+      position: fixed;
+      inset: 0;
+      /* canvas 是替换元素，必须显式撑满，否则退回固有尺寸导致高分屏放大裁切与点击偏移 */
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .vignette {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background: radial-gradient(ellipse at 50% 50%, rgba(0, 0, 0, 0) 38%, rgba(0, 0, 0, .62) 100%);
+      mix-blend-mode: multiply;
+    }
+
+    .grain {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .035;
+      mix-blend-mode: overlay;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+      background-size: 160px 160px;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html, body { animation: none; }
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="stage"></canvas>
+  <div class="vignette"></div>
+  <div class="grain"></div>
+
+  <script>
+    (function () {
+      'use strict';
+
+      var canvas = document.getElementById('stage');
+      var ctx = canvas.getContext('2d', { alpha: false });
+      var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+      var W = 0, H = 0, DPR = 1, cx = 0, cy = 0, sceneScale = 300;
+      var TILT = 0.30;
+
+      // 指针坐标统一使用 CSS 像素（与 setTransform 后的绘图坐标系一致）
+      var pointer = { x: 0, y: 0, active: false, down: false };
+      var ripples = [];
+      var RIPPLE_LIFE = 1.5;
+      var holdStart = 0;
+
+      var lastInput = performance.now();
+      var eco = 0, lastDraw = 0, time = 0, frameDt = 1 / 60;
+
+      var stars = [], dust = [], hotspots = [], nebula = [];
+
+      function rand(a, b) { return a + Math.random() * (b - a); }
+      function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+      function markInput() {
+        lastInput = performance.now();
+        eco = 0;
+      }
+
+      // ---------- 场景数据 ----------
+      function buildStars() {
+        var count = Math.round(Math.min(620, (W * H) / 3400));
+        stars = new Array(count);
+        for (var i = 0; i < count; i++) {
+          stars[i] = {
+            x: Math.random() * W,
+            y: Math.random() * H,
+            z: 0.2 + Math.random() * 0.8,
+            r: 0.35 + Math.random() * 1.5,
+            tw: Math.random() * Math.PI * 2,
+            tws: 0.25 + Math.random() * 1.1,
+            warm: Math.random() < 0.22
+          };
+        }
+      }
+
+      function buildDust() {
+        var count = Math.round(Math.min(1600, (W * H) / 1000));
+        dust = new Array(count);
+        for (var i = 0; i < count; i++) {
+          var rr = 0.98 + Math.pow(Math.random(), 1.5) * 1.55;
+          dust[i] = {
+            a: Math.random() * Math.PI * 2,
+            r: rr,
+            spd: Math.pow(0.98 / rr, 1.5) * (0.55 + Math.random() * 0.35),
+            size: 0.5 + Math.random() * 1.6,
+            bright: 0.4 + Math.random() * 0.6,
+            wob: Math.random() * Math.PI * 2,
+            wobSpd: 0.4 + Math.random() * 1.1,
+            ox: 0, oy: 0, vx: 0, vy: 0, gl: 0
+          };
+        }
+
+        // 吸积盘上的高亮热斑，制造明暗层次
+        var spotCount = W > 1100 ? 9 : 6;
+        hotspots = new Array(spotCount);
+        for (var k = 0; k < spotCount; k++) {
+          hotspots[k] = {
+            a: Math.random() * Math.PI * 2,
+            r: rand(1.02, 1.9),
+            spd: rand(0.35, 0.75),
+            size: rand(0.05, 0.13),
+            hue: rand(0, 1)
+          };
+        }
+      }
+
+      function buildNebula() {
+        var R = Math.max(W, H);
+        nebula = [
+          { x: cx - R * 0.22, y: cy - R * 0.16, r: R * 0.55, c: '70,40,140', a: 0.16 },
+          { x: cx + R * 0.26, y: cy + R * 0.10, r: R * 0.50, c: '20,80,120', a: 0.13 },
+          { x: cx + R * 0.05, y: cy - R * 0.28, r: R * 0.42, c: '120,50,60', a: 0.09 }
+        ];
+      }
+
+      function resize() {
+        var rect = canvas.getBoundingClientRect();
+        W = rect.width || window.innerWidth;
+        H = rect.height || window.innerHeight;
+        DPR = Math.min(2, window.devicePixelRatio || 1);
+        canvas.width = Math.round(W * DPR);
+        canvas.height = Math.round(H * DPR);
+        ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+        cx = W * 0.5;
+        cy = H * 0.5;
+        sceneScale = Math.min(W, H) * 0.30;
+        buildStars();
+        buildDust();
+        buildNebula();
+      }
+
+      // ---------- 交互 ----------
+      function toLocal(e) {
+        var rect = canvas.getBoundingClientRect();
+        return {
+          x: clamp(e.clientX - rect.left, 0, rect.width),
+          y: clamp(e.clientY - rect.top, 0, rect.height)
+        };
+      }
+
+      window.addEventListener('resize', resize, { passive: true });
+
+      window.addEventListener('pointermove', function (e) {
+        var p = toLocal(e);
+        pointer.x = p.x;
+        pointer.y = p.y;
+        pointer.active = true;
+        markInput();
+      }, { passive: true });
+
+      window.addEventListener('pointerdown', function (e) {
+        var p = toLocal(e);
+        pointer.x = p.x;
+        pointer.y = p.y;
+        pointer.active = true;
+        pointer.down = true;
+        holdStart = performance.now();
+        ripples.push({ x: p.x, y: p.y, born: time, power: 1 });
+        if (ripples.length > 6) ripples.shift();
+        markInput();
+      }, { passive: true });
+
+      window.addEventListener('pointerup', function () {
+        if (pointer.down) {
+          var held = (performance.now() - holdStart) / 1000;
+          if (held > 0.3 && ripples.length) {
+            var last = ripples[ripples.length - 1];
+            last.power = 1 + Math.min(held, 1.5) * 0.9;
+            last.born = time;
+          }
+        }
+        pointer.down = false;
+      }, { passive: true });
+
+      window.addEventListener('pointercancel', function () { pointer.down = false; }, { passive: true });
+      window.addEventListener('pointerleave', function () {
+        pointer.active = false;
+        pointer.down = false;
+      }, { passive: true });
+      window.addEventListener('blur', function () {
+        pointer.active = false;
+        pointer.down = false;
+      });
+
+      window.addEventListener('keydown', function (e) {
+        if (e.key === ' ' && pointer.active) {
+          ripples.push({
+            x: pointer.x, y: pointer.y, born: time,
+            power: 1.6
+          });
+          if (ripples.length > 6) ripples.shift();
+        }
+        markInput();
+      }, { passive: true });
+
+      // ---------- 位移场：指针斥力 + 涟漪环 ----------
+      function interactionOffsetFor(x, y, t, scale) {
+        var ox = 0, oy = 0, boost = 0;
+        if (pointer.active) {
+          var dx = x - pointer.x;
+          var dy = y - pointer.y;
+          var dist = Math.sqrt(dx * dx + dy * dy) + 1e-4;
+          var radius = scale * 2.1;
+          if (dist < radius) {
+            var f = 1 - dist / radius;
+            var strength = f * f * f * (pointer.down ? 1.9 : 1.2);
+            ox -= (dx / dist) * strength * scale * 0.24;
+            oy -= (dy / dist) * strength * scale * 0.24;
+            boost += strength * 3.2;
+          }
+        }
+        for (var i = 0; i < ripples.length; i++) {
+          var r = ripples[i];
+          var age = t - r.born;
+          if (age < 0 || age > RIPPLE_LIFE) continue;
+          var prog = age / RIPPLE_LIFE;
+          var ring = scale * 4.2 * (1 - Math.pow(1 - prog, 2)) * (r.power || 1);
+          var dxr = x - r.x;
+          var dyr = y - r.y;
+          var dr = Math.sqrt(dxr * dxr + dyr * dyr) + 1e-4;
+          var w = Math.exp(-Math.pow((dr - ring) / (scale * 0.5), 2)) * (1 - prog) * (r.power || 1);
+          ox += (dxr / dr) * w * scale * 0.18;
+          oy += (dyr / dr) * w * scale * 0.18;
+          boost += w * 3.0;
+        }
+        return { x: ox, y: oy, boost: boost };
+      }
+
+      function rampColor(u) {
+        var r, g, b, k;
+        if (u < 0.35) {
+          k = u / 0.35;
+          r = 255; g = 246 - k * 70; b = 224 - k * 130;
+        } else if (u < 0.7) {
+          k = (u - 0.35) / 0.35;
+          r = 255 - k * 203; g = 176 - k * 35; b = 94 + k * 144;
+        } else {
+          k = (u - 0.7) / 0.3;
+          r = 52 + k * 54; g = 141 - k * 66; b = 238 + k * 17;
+        }
+        return [r | 0, g | 0, b | 0];
+      }
+
+      // ---------- 绘制 ----------
+      function draw() {
+        var tSec = time;
+
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.fillStyle = '#02030a';
+        ctx.fillRect(0, 0, W, H);
+
+        var parX = 0, parY = 0;
+        if (pointer.active) {
+          var nx = (pointer.x - cx) / (W * 0.5);
+          var ny = (pointer.y - cy) / (H * 0.5);
+          parX = -nx * sceneScale * 0.09;
+          parY = -ny * sceneScale * 0.09;
+        }
+
+        // 星云底色
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (var i = 0; i < nebula.length; i++) {
+          var n = nebula[i];
+          var g = ctx.createRadialGradient(n.x + parX * 0.2, n.y + parY * 0.2, 0,
+            n.x + parX * 0.2, n.y + parY * 0.2, n.r);
+          g.addColorStop(0, 'rgba(' + n.c + ',' + n.a + ')');
+          g.addColorStop(1, 'rgba(' + n.c + ',0)');
+          ctx.fillStyle = g;
+          ctx.fillRect(0, 0, W, H);
+        }
+        ctx.restore();
+
+        // 星空
+        var starBudget = Math.max(90, Math.floor(stars.length * (1 - eco * 0.55)));
+        for (var s = 0; s < starBudget; s++) {
+          var st = stars[s];
+          var tw = 0.6 + 0.4 * Math.sin(tSec * st.tws + st.tw);
+          var px = st.x + parX * st.z;
+          var py = st.y + parY * st.z;
+          var alpha = (0.22 + 0.62 * tw) * st.z;
+          ctx.fillStyle = st.warm
+            ? 'rgba(255,214,170,' + alpha.toFixed(3) + ')'
+            : 'rgba(214,232,255,' + alpha.toFixed(3) + ')';
+          ctx.beginPath();
+          ctx.arc(px, py, st.r * (0.8 + tw * 0.4), 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        var bhR = sceneScale * 0.78;
+        var innerR = bhR * 1.10;
+        var outerR = sceneScale * 2.55;
+        var diskCX = cx + parX * 0.4;
+        var diskCY = cy + parY * 0.4;
+
+        // 吸积盘雾 + 多普勒不对称
+        ctx.save();
+        ctx.translate(diskCX, diskCY);
+        ctx.scale(1, TILT);
+        var haze = ctx.createRadialGradient(0, 0, innerR * 0.9, 0, 0, outerR);
+        haze.addColorStop(0, 'rgba(255,190,120,0)');
+        haze.addColorStop(0.10, 'rgba(255,204,146,0.36)');
+        haze.addColorStop(0.32, 'rgba(96,206,236,0.22)');
+        haze.addColorStop(0.65, 'rgba(96,76,224,0.12)');
+        haze.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = haze;
+        ctx.beginPath();
+        ctx.arc(0, 0, outerR, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 多普勒亮暗侧：裁剪进圆内，避免矩形填充露出直线硬边
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(0, 0, outerR, 0, Math.PI * 2);
+        ctx.clip();
+
+        var dopL = ctx.createRadialGradient(-outerR * 0.45, 0, 0, -outerR * 0.45, 0, outerR * 0.75);
+        dopL.addColorStop(0, 'rgba(255,244,226,0.32)');
+        dopL.addColorStop(0.62, 'rgba(255,244,226,0.10)');
+        dopL.addColorStop(0.86, 'rgba(255,244,226,0)');
+        dopL.addColorStop(1, 'rgba(255,244,226,0)');
+        ctx.fillStyle = dopL;
+        ctx.fillRect(-outerR, -outerR, outerR * 2, outerR * 2);
+
+        var dopR = ctx.createRadialGradient(outerR * 0.45, 0, 0, outerR * 0.45, 0, outerR * 0.75);
+        dopR.addColorStop(0, 'rgba(150,32,22,0.28)');
+        dopR.addColorStop(0.62, 'rgba(150,32,22,0.09)');
+        dopR.addColorStop(0.86, 'rgba(150,32,22,0)');
+        dopR.addColorStop(1, 'rgba(150,32,22,0)');
+        ctx.fillStyle = dopR;
+        ctx.fillRect(-outerR, -outerR, outerR * 2, outerR * 2);
+        ctx.restore();
+        ctx.restore();
+
+        // 吸积盘粒子
+        var dustBudget = Math.max(260, Math.floor(dust.length * (1 - eco * 0.55)));
+        ctx.save();
+        ctx.translate(diskCX, diskCY);
+        ctx.scale(1, TILT);
+        ctx.globalCompositeOperation = 'lighter';
+        var springK = 42, damp = 7.5;
+        for (var d = 0; d < dustBudget; d++) {
+          var p = dust[d];
+          var ang = p.a + tSec * p.spd * 0.62 + Math.sin(tSec * p.wobSpd + p.wob) * 0.03;
+          var rr = p.r * sceneScale;
+          var bx = Math.cos(ang) * rr;
+          var by = Math.sin(ang) * rr;
+
+          var sx = bx + diskCX;
+          var sy = by * TILT + diskCY;
+          var io = interactionOffsetFor(sx, sy, tSec, sceneScale);
+
+          p.vx += (io.x - p.ox) * springK * frameDt;
+          p.vy += (io.y - p.oy) * springK * frameDt;
+          p.vx -= p.vx * damp * frameDt;
+          p.vy -= p.vy * damp * frameDt;
+          p.ox += p.vx * frameDt;
+          p.oy += p.vy * frameDt;
+
+          var disp = Math.min(1, Math.sqrt(p.ox * p.ox + p.oy * p.oy) / (sceneScale * 0.16));
+          p.gl += (disp - p.gl) * Math.min(1, frameDt * 9);
+
+          var qx = bx + p.ox;
+          var qy = by + p.oy;
+
+          var u = clamp((p.r - 0.98) / 1.55, 0, 1);
+          var heat = 1 - u;
+          var flick = 0.6 + 0.4 * Math.sin(tSec * 0.9 + p.wob);
+          var a = (0.20 + heat * 0.98) * p.bright * flick;
+          var boost = Math.min(1, io.boost * 0.9);
+          var alpha = Math.min(1, a + boost * 0.6 + p.gl * 0.55);
+
+          var dop = -Math.cos(ang);
+          var c = rampColor(u);
+          var dr = Math.min(255, c[0] + dop * 62 + 18);
+          var dg = Math.max(0, Math.min(255, c[1] + dop * 46 + 12));
+          var db = Math.max(0, Math.min(255, c[2] + dop * 14 + 10));
+          var dAlpha = Math.min(1, alpha * (1 + dop * 0.55));
+
+          ctx.fillStyle = 'rgba(' + (dr | 0) + ',' + (dg | 0) + ',' + (db | 0) + ',' + dAlpha.toFixed(3) + ')';
+          var sz = p.size * 1.15 * (0.7 + heat * 0.95) * (1 + boost * 0.9 + p.gl * 0.7);
+          ctx.beginPath();
+          ctx.arc(qx, qy, sz, 0, Math.PI * 2);
+          ctx.fill();
+
+          if (p.gl > 0.03) {
+            var tr = sz * (2.6 + p.gl * 2.2);
+            var tg = ctx.createRadialGradient(qx, qy, 0, qx, qy, tr);
+            tg.addColorStop(0, 'rgba(190,225,255,' + (p.gl * 0.42).toFixed(3) + ')');
+            tg.addColorStop(1, 'rgba(120,170,255,0)');
+            ctx.fillStyle = tg;
+            ctx.beginPath();
+            ctx.arc(qx, qy, tr, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+
+        // 热斑
+        for (var h = 0; h < hotspots.length; h++) {
+          var hs = hotspots[h];
+          var ha = hs.a + tSec * hs.spd * 0.5;
+          var hr = hs.r * sceneScale;
+          var hx = Math.cos(ha) * hr;
+          var hy = Math.sin(ha) * hr;
+          var hsz = hs.size * sceneScale * (0.75 + 0.25 * Math.sin(tSec * 1.7 + h));
+          var hgrad = ctx.createRadialGradient(hx, hy, 0, hx, hy, hsz);
+          hgrad.addColorStop(0, 'rgba(255,248,232,0.55)');
+          hgrad.addColorStop(0.4, 'rgba(255,206,140,0.22)');
+          hgrad.addColorStop(1, 'rgba(255,180,120,0)');
+          ctx.fillStyle = hgrad;
+          ctx.beginPath();
+          ctx.arc(hx, hy, hsz, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+
+        // 光子环
+        ctx.save();
+        ctx.translate(cx + parX * 0.5, cy + parY * 0.5);
+        ctx.scale(1, TILT * 0.95);
+        ctx.globalCompositeOperation = 'lighter';
+        var ringR = bhR * 1.06;
+        var ring = ctx.createRadialGradient(0, 0, ringR * 0.92, 0, 0, ringR * 1.35);
+        ring.addColorStop(0, 'rgba(255,246,224,0)');
+        ring.addColorStop(0.30, 'rgba(255,246,224,0.95)');
+        ring.addColorStop(0.52, 'rgba(255,196,120,0.55)');
+        ring.addColorStop(0.78, 'rgba(120,190,255,0.20)');
+        ring.addColorStop(1, 'rgba(80,60,180,0)');
+        ctx.fillStyle = ring;
+        ctx.beginPath();
+        ctx.arc(0, 0, ringR * 1.35, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+
+        // 事件视界
+        ctx.save();
+        ctx.translate(cx + parX * 0.5, cy + parY * 0.5);
+        var occl = ctx.createRadialGradient(0, 0, bhR * 0.6, 0, 0, bhR * 1.18);
+        occl.addColorStop(0, 'rgba(0,0,0,1)');
+        occl.addColorStop(0.80, 'rgba(0,0,0,1)');
+        occl.addColorStop(1, 'rgba(2,2,8,0)');
+        ctx.fillStyle = occl;
+        ctx.beginPath();
+        ctx.arc(0, 0, bhR * 1.18, 0, Math.PI * 2);
+        ctx.fill();
+
+        var bhGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, bhR);
+        bhGrad.addColorStop(0, '#000000');
+        bhGrad.addColorStop(0.90, '#000000');
+        bhGrad.addColorStop(1, 'rgba(0,0,0,0.98)');
+        ctx.fillStyle = bhGrad;
+        ctx.beginPath();
+        ctx.arc(0, 0, bhR, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.globalCompositeOperation = 'lighter';
+        var rim = ctx.createRadialGradient(0, 0, bhR * 0.96, 0, 0, bhR * 1.10);
+        rim.addColorStop(0, 'rgba(255,240,210,0)');
+        rim.addColorStop(0.5, 'rgba(255,236,200,0.55)');
+        rim.addColorStop(1, 'rgba(255,236,200,0)');
+        ctx.fillStyle = rim;
+        ctx.beginPath();
+        ctx.arc(0, 0, bhR * 1.10, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+
+        // 指针引力光晕
+        if (pointer.active) {
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          var gr = sceneScale * 1.05;
+          var cg = ctx.createRadialGradient(pointer.x, pointer.y, 0, pointer.x, pointer.y, gr);
+          var intensity = pointer.down ? 0.24 : 0.14;
+          cg.addColorStop(0, 'rgba(180,220,255,' + intensity + ')');
+          cg.addColorStop(0.5, 'rgba(120,160,255,' + (intensity * 0.4) + ')');
+          cg.addColorStop(1, 'rgba(120,160,255,0)');
+          ctx.fillStyle = cg;
+          ctx.fillRect(pointer.x - gr, pointer.y - gr, gr * 2, gr * 2);
+          ctx.restore();
+        }
+
+        // 引力涟漪
+        for (var ri = 0; ri < ripples.length; ri++) {
+          var rp = ripples[ri];
+          var age = tSec - rp.born;
+          if (age < 0 || age > RIPPLE_LIFE) continue;
+          var prog = age / RIPPLE_LIFE;
+          var rad = sceneScale * 3.8 * (1 - Math.pow(1 - prog, 2)) * (rp.power || 1);
+          var alphaR = Math.pow(1 - prog, 1.5) * 0.9 * (rp.power || 1);
+          ctx.save();
+          ctx.translate(rp.x, rp.y);
+          ctx.scale(1, TILT);
+          ctx.globalCompositeOperation = 'lighter';
+          var pulse = ctx.createRadialGradient(0, 0, rad * 0.5, 0, 0, rad);
+          pulse.addColorStop(0, 'rgba(255,220,180,0)');
+          pulse.addColorStop(0.55, 'rgba(255,230,190,' + (alphaR * 0.7).toFixed(3) + ')');
+          pulse.addColorStop(0.82, 'rgba(160,225,255,' + alphaR.toFixed(3) + ')');
+          pulse.addColorStop(1, 'rgba(120,180,255,0)');
+          ctx.fillStyle = pulse;
+          ctx.beginPath();
+          ctx.arc(0, 0, rad, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+        ctx.globalCompositeOperation = 'source-over';
+      }
+
+      // ---------- 主循环：空闲降到 30fps 节能 ----------
+      function frame(now) {
+        var idle = now - lastInput;
+        var target = idle > 4500 ? 1 : 0;
+        eco += (target - eco) * 0.045;
+
+        var step = 1000 / (60 - eco * 30);
+        if (now - lastDraw < step - 1) {
+          requestAnimationFrame(frame);
+          return;
+        }
+
+        var dt = Math.min(0.1, (now - lastDraw) / 1000);
+        lastDraw = now;
+        frameDt = dt;
+
+        time += dt * (reduceMotion ? 0.15 : 0.9);
+
+        for (var i = ripples.length - 1; i >= 0; i--) {
+          if (time - ripples[i].born > RIPPLE_LIFE) ripples.splice(i, 1);
+        }
+
+        draw();
+        requestAnimationFrame(frame);
+      }
+
+      resize();
+      lastDraw = performance.now();
+      requestAnimationFrame(frame);
+    })();
+  </script>
+</body>
+
+</html>

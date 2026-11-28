@@ -191,7 +191,11 @@
                                     Background="#FF34D399"
                                     CornerRadius="2" />
                                 <StackPanel Grid.Column="1" Spacing="1">
-                                    <TextBlock FontSize="16" FontWeight="SemiBold" Text="当前壁纸" />
+                                    <TextBlock
+                                        x:Name="PreviewSectionTitle"
+                                        FontSize="16"
+                                        FontWeight="SemiBold"
+                                        Text="当前壁纸" />
                                     <TextBlock
                                         CharacterSpacing="100"
                                         FontSize="10"
@@ -199,7 +203,7 @@
                                         Text="02 · NOW PLAYING" />
                                 </StackPanel>
                             </Grid>
-                            <Grid Height="320">
+                            <Grid Height="320" MinHeight="320">
                                 <Border
                                     Background="{ThemeResource ContactableChipBrush}"
                                     BorderBrush="{ThemeResource ContactableHairlineBrush}"
@@ -212,6 +216,8 @@
                                 <WebView2
                                     x:Name="PreviewWebView"
                                     Height="320"
+                                    HorizontalAlignment="Stretch"
+                                    VerticalAlignment="Stretch"
                                     DefaultBackgroundColor="Transparent"
                                     Visibility="Collapsed" />
                                 <StackPanel
@@ -315,6 +321,13 @@
                                     FontSize="12"
                                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                     TextWrapping="Wrap" />
+                                <TextBlock
+                                    x:Name="PreviewModeHint"
+                                    FontSize="12"
+                                    Foreground="{ThemeResource ContactableAccentBrush}"
+                                    Text="预览中 · 尚未应用到桌面，点下方“更换”才会生效。"
+                                    TextWrapping="Wrap"
+                                    Visibility="Collapsed" />
                             </StackPanel>
                         </StackPanel>
                     </Border>
@@ -354,7 +367,8 @@
                             <ComboBox
                                 x:Name="WallpaperPicker"
                                 DisplayMemberPath="Title"
-                                PlaceholderText="从壁纸库选择" />
+                                PlaceholderText="从壁纸库选择"
+                                SelectionChanged="WallpaperPicker_SelectionChanged" />
                             <StackPanel Orientation="Horizontal" Spacing="10">
                                 <Button
                                     x:Name="SwitchButton"

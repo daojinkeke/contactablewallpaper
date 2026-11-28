@@ -72,9 +72,9 @@ namespace Lively.Common.Helpers
         {
             // The low-order word specifies the x-coordinate of the cursor, the high-order word specifies the y-coordinate of the cursor.
             // Ref: https://docs.microsoft.com/en-us/windows/win32/inputdev/wm-mousemove
-            uint lParam = Convert.ToUInt32(y);
-            lParam <<= 16;
-            lParam |= Convert.ToUInt32(x);
+            // 与滚轮一致按 16 位有符号钳制：跨屏/边界情况下坐标为负或越界时，
+            // Convert.ToUInt32 会直接抛 OverflowException 让整条输入被丢弃。
+            uint lParam = MakeMouseLParam(x, y);
             NativeMethods.PostMessageW(hwnd, msg, wParam, (UIntPtr)lParam);
         }
 

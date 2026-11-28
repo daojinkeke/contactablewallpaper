@@ -1,0 +1,21 @@
+{
+  "AppVersion": "2.2.1.5",
+  "Title": "霓虹雨夜",
+  "Thumbnail": "thumbnail.jpg",
+  "Preview": null,
+  "Desc": "雨幕下的城市天际线，窗灯与霓虹随时间与天气亮起或熄灭；晴天是灰紫空城，雨夜灯火全开。点击会打出一道沿街面炸开的霓虹电脉冲。",
+  "Author": "Contactable Wallpaper",
+  "License": "",
+  "Contact": "",
+  "Type": 1,
+  "FileName": "index.html",
+  "Arguments": null,
+  "IsAbsolutePath": false,
+  "Id": null,
+  "Tags": [
+    "环境",
+    "城市",
+    "实时天气"
+  ],
+  "Version": 1
+}
